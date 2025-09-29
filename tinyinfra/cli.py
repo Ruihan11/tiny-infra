@@ -9,7 +9,7 @@ import torch
 
 from .model.llama3 import Llama3Model
 from .benchmark.throughput import ThroughputBenchmark
-from .benchmark.latency import LatencyBenchmark  # 新增
+from .benchmark.latency import LatencyBenchmark
 
 
 @click.group()
@@ -27,41 +27,35 @@ def benchmark():
 
 
 @benchmark.command()
-@click.option('--model', default='meta-llama/Meta-Llama-3-8B', 
-              help='Model name')
-@click.option('--device', default='cuda', 
-              help='Device (cuda/cpu)')
-@click.option('--batch-size', default=1, type=int,
-              help='Batch size')
-@click.option('--num-tokens', default=128, type=int,
-              help='Number of tokens to generate')
-@click.option('--num-runs', default=10, type=int,
-              help='Number of benchmark runs')
-@click.option('--warmup', default=3, type=int,
-              help='Number of warmup runs')
-@click.option('--output', default='results/baseline',
-              help='Output directory for results')
-@click.option('--prompt', default='Explain artificial intelligence',
-              help='Input prompt for generation')
-def throughput(model, device, batch_size, num_tokens, num_runs, warmup, output, prompt):
+@click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name')
+@click.option('--device', default='cuda', help='Device (cuda/cpu)')
+@click.option('--batch-size', default=1, type=int, help='Batch size')
+@click.option('--num-tokens', default=128, type=int, help='Number of tokens to generate')
+@click.option('--num-runs', default=10, type=int, help='Number of benchmark runs')
+@click.option('--warmup', default=3, type=int, help='Number of warmup runs')
+@click.option('--output', default='results/baseline', help='Output directory for results')
+@click.option('--prompt', default='Explain artificial intelligence', help='Input prompt')
+@click.option('--profile', is_flag=True, help='Enable PyTorch profiler for detailed analysis')
+def throughput(model, device, batch_size, num_tokens, num_runs, warmup, output, prompt, profile):
     """
     Measure throughput (tokens/second)
     
     Example:
         tinyinfra benchmark throughput
         tinyinfra benchmark throughput --batch-size 8
+        tinyinfra benchmark throughput --profile  # Enable profiling
     """
     click.echo("\n" + "="*60)
     click.echo("🚀 TINYINFRA THROUGHPUT BENCHMARK")
     click.echo("="*60)
     
-    # Configuration
     click.echo("\n📋 Configuration:")
     click.echo(f"   Model:      {model}")
     click.echo(f"   Device:     {device}")
     click.echo(f"   Batch size: {batch_size}")
     click.echo(f"   Tokens:     {num_tokens}")
     click.echo(f"   Runs:       {num_runs}")
+    click.echo(f"   Profiling:  {'ENABLED' if profile else 'DISABLED'}")
     
     # Load model
     click.echo("\n⏳ Loading model...")
@@ -82,7 +76,9 @@ def throughput(model, device, batch_size, num_tokens, num_runs, warmup, output, 
             batch_size=batch_size,
             num_tokens=num_tokens,
             num_runs=num_runs,
-            warmup_runs=warmup
+            warmup_runs=warmup,
+            enable_profiler=profile,
+            profile_output_dir=output if profile else None
         )
         
         bench.print_results(results)
@@ -93,10 +89,17 @@ def throughput(model, device, batch_size, num_tokens, num_runs, warmup, output, 
         
         output_file = output_dir / "throughput.json"
         with open(output_file, 'w') as f:
-            save_results = {k: v for k, v in results.items() if k != 'all_times'}
+            # Don't save large profile data to main JSON
+            save_results = {k: v for k, v in results.items() 
+                          if k not in ['profile_summary']}
             json.dump(save_results, f, indent=2)
         
         click.echo(f"💾 Results saved to: {output_file}")
+        
+        if profile:
+            click.echo(f"\n📊 Profiling artifacts:")
+            click.echo(f"   Chrome trace: {results.get('profile_trace')}")
+            click.echo(f"   View in: chrome://tracing")
         
     except Exception as e:
         click.echo(f"❌ Benchmark failed: {e}", err=True)
@@ -105,44 +108,34 @@ def throughput(model, device, batch_size, num_tokens, num_runs, warmup, output, 
         sys.exit(1)
 
 
-@benchmark.command()  # 新增 latency 命令
-@click.option('--model', default='meta-llama/Meta-Llama-3-8B', 
-              help='Model name')
-@click.option('--device', default='cuda', 
-              help='Device (cuda/cpu)')
-@click.option('--num-tokens', default=128, type=int,
-              help='Number of tokens to generate')
-@click.option('--num-runs', default=100, type=int,
-              help='Number of benchmark runs')
-@click.option('--warmup', default=5, type=int,
-              help='Number of warmup runs')
-@click.option('--output', default='results/baseline',
-              help='Output directory for results')
-@click.option('--prompt', default='Explain artificial intelligence',
-              help='Input prompt for generation')
-def latency(model, device, num_tokens, num_runs, warmup, output, prompt):
+@benchmark.command()
+@click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name')
+@click.option('--device', default='cuda', help='Device (cuda/cpu)')
+@click.option('--num-tokens', default=128, type=int, help='Number of tokens to generate')
+@click.option('--num-runs', default=100, type=int, help='Number of benchmark runs')
+@click.option('--warmup', default=5, type=int, help='Number of warmup runs')
+@click.option('--output', default='results/baseline', help='Output directory for results')
+@click.option('--prompt', default='Explain artificial intelligence', help='Input prompt')
+@click.option('--profile', is_flag=True, help='Enable PyTorch profiler for detailed analysis')
+def latency(model, device, num_tokens, num_runs, warmup, output, prompt, profile):
     """
     Measure latency (response time)
-    
-    Measures:
-    - First Token Latency (TTFT)
-    - End-to-End Latency
-    - Per-Token Latency
     
     Example:
         tinyinfra benchmark latency
         tinyinfra benchmark latency --num-runs 200
+        tinyinfra benchmark latency --profile  # Enable profiling
     """
     click.echo("\n" + "="*60)
     click.echo("⚡ TINYINFRA LATENCY BENCHMARK")
     click.echo("="*60)
     
-    # Configuration
     click.echo("\n📋 Configuration:")
     click.echo(f"   Model:      {model}")
     click.echo(f"   Device:     {device}")
     click.echo(f"   Tokens:     {num_tokens}")
     click.echo(f"   Runs:       {num_runs}")
+    click.echo(f"   Profiling:  {'ENABLED' if profile else 'DISABLED'}")
     
     # Load model
     click.echo("\n⏳ Loading model...")
@@ -162,7 +155,9 @@ def latency(model, device, num_tokens, num_runs, warmup, output, prompt):
             prompt=prompt,
             num_tokens=num_tokens,
             num_runs=num_runs,
-            warmup_runs=warmup
+            warmup_runs=warmup,
+            enable_profiler=profile,
+            profile_output_dir=output if profile else None
         )
         
         bench.print_results(results)
@@ -173,9 +168,19 @@ def latency(model, device, num_tokens, num_runs, warmup, output, prompt):
         
         output_file = output_dir / "latency.json"
         with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2)
+            save_results = {k: v for k, v in results.items() 
+                          if k not in ['profile_summary']}
+            json.dump(save_results, f, indent=2)
         
         click.echo(f"💾 Results saved to: {output_file}")
+        
+        if profile:
+            e2e = results.get('end_to_end', {})
+            trace = e2e.get('profile_trace')
+            if trace:
+                click.echo(f"\n📊 Profiling artifacts:")
+                click.echo(f"   Chrome trace: {trace}")
+                click.echo(f"   View in: chrome://tracing")
         
     except Exception as e:
         click.echo(f"❌ Benchmark failed: {e}", err=True)
@@ -184,19 +189,23 @@ def latency(model, device, num_tokens, num_runs, warmup, output, prompt):
         sys.exit(1)
 
 
-@benchmark.command()  # 新增 all 命令
+@benchmark.command()
 @click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name')
 @click.option('--device', default='cuda', help='Device (cuda/cpu)')
 @click.option('--output', default='results/baseline', help='Output directory')
-def all(model, device, output):
+@click.option('--profile', is_flag=True, help='Enable profiling for all benchmarks')
+def all(model, device, output, profile):
     """
     Run all benchmarks (throughput + latency)
     
     Example:
         tinyinfra benchmark all
+        tinyinfra benchmark all --profile  # Enable profiling
     """
     click.echo("\n" + "="*60)
     click.echo("🎯 TINYINFRA FULL BENCHMARK SUITE")
+    if profile:
+        click.echo("📊 Profiling: ENABLED")
     click.echo("="*60)
     
     # Load model once
@@ -217,11 +226,16 @@ def all(model, device, output):
     click.echo("="*60)
     try:
         bench_tp = ThroughputBenchmark(llama)
-        results_tp = bench_tp.run(num_runs=20)
+        results_tp = bench_tp.run(
+            num_runs=20,
+            enable_profiler=profile,
+            profile_output_dir=str(output_dir) if profile else None
+        )
         bench_tp.print_results(results_tp)
         
         with open(output_dir / "throughput.json", 'w') as f:
-            save_results = {k: v for k, v in results_tp.items() if k != 'all_times'}
+            save_results = {k: v for k, v in results_tp.items() 
+                          if k not in ['all_times', 'profile_summary']}
             json.dump(save_results, f, indent=2)
     except Exception as e:
         click.echo(f"❌ Throughput benchmark failed: {e}", err=True)
@@ -232,11 +246,17 @@ def all(model, device, output):
     click.echo("="*60)
     try:
         bench_lat = LatencyBenchmark(llama)
-        results_lat = bench_lat.run(num_runs=100)
+        results_lat = bench_lat.run(
+            num_runs=100,
+            enable_profiler=profile,
+            profile_output_dir=str(output_dir) if profile else None
+        )
         bench_lat.print_results(results_lat)
         
         with open(output_dir / "latency.json", 'w') as f:
-            json.dump(results_lat, f, indent=2)
+            save_results = {k: v for k, v in results_lat.items() 
+                          if k not in ['profile_summary']}
+            json.dump(save_results, f, indent=2)
     except Exception as e:
         click.echo(f"❌ Latency benchmark failed: {e}", err=True)
     
@@ -245,7 +265,15 @@ def all(model, device, output):
     click.echo("="*60)
     click.echo(f"\n💾 Results saved to: {output_dir}/")
     click.echo(f"   - throughput.json")
-    click.echo(f"   - latency.json\n")
+    click.echo(f"   - latency.json")
+    
+    if profile:
+        click.echo(f"\n📊 Profiling traces:")
+        click.echo(f"   - {output_dir}/throughput_profile.json")
+        click.echo(f"   - {output_dir}/latency_profile.json")
+        click.echo(f"   View in: chrome://tracing")
+    
+    click.echo()
 
 
 @cli.command()

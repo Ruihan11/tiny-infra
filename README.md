@@ -19,7 +19,7 @@ Llama-3-8B End-to-End Inference Optimization
 > Understand bottlenecks → Targeted optimization → Validate results  
 
 Phase 1: Performance Profiling (Week 1-2)  
-- [ ] Establish performance baseline (latency, throughput, memory, accuracy)
+- [x] Establish performance baseline (latency, throughput, memory, accuracy)
 - [ ] PyTorch Profiler for operator-level analysis
 - [ ] Nsight Systems for GPU activity analysis
 

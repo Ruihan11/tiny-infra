@@ -1,4 +1,6 @@
-torch
-huggingface_hub
-transformers 
-accelerate
+torch>=2.2.0
+transformers>=4.36.0
+accelerate>=0.25.0
+click>=8.1.0
+numpy>=1.24.0
+pytest>=7.4.0
