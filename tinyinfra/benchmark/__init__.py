@@ -1,7 +1,13 @@
+"""
+Benchmark module
+"""
+
 from .throughput import ThroughputBenchmark
 from .latency import LatencyBenchmark
+from .accuracy import AccuracyBenchmark
 
-all = [
+__all__ = [
     'ThroughputBenchmark',
-    'LatencyBenchmark'
+    'LatencyBenchmark',
+    'AccuracyBenchmark'
 ]

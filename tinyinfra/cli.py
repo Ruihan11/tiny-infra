@@ -10,6 +10,7 @@ import torch
 from .model.llama3 import Llama3Model
 from .benchmark.throughput import ThroughputBenchmark
 from .benchmark.latency import LatencyBenchmark
+from .benchmark.accuracy import AccuracyBenchmark
 
 
 @click.group()
@@ -31,28 +32,74 @@ def benchmark():
 @benchmark.command()
 @click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name or path')
 @click.option('--batch-size', default=1, type=int, help='Batch size')
-@click.option('--num-tokens', default=128, type=int, help='Tokens to generate')
-@click.option('--num-runs', default=10, type=int, help='Benchmark runs')
+@click.option('--num-tokens', default=128, type=int, help='Number of tokens to generate')
+@click.option('--num-runs', default=10, type=int, help='Number of benchmark runs')
+@click.option('--warmup', default=3, type=int, help='Number of warmup runs')
+@click.option('--prompt', default='Explain artificial intelligence', help='Input prompt for generation')
 @click.option('--output', default='results/baseline', help='Output directory')
 @click.option('--profile', is_flag=True, help='Enable profiling (lightweight)')
-def throughput(model, batch_size, num_tokens, num_runs, output, profile):
+@click.option('--device', default='cuda', type=click.Choice(['cuda', 'cpu', 'auto']), help='Device to use')
+def throughput(model, batch_size, num_tokens, num_runs, warmup, prompt, output, profile, device):
     """
     Measure throughput (tokens/second)
     
-    Example:
-        tinyinfra benchmark throughput
-        tinyinfra benchmark throughput --profile
-        tinyinfra benchmark throughput --batch-size 8 --num-runs 50
+    \b
+    Examples:
+        # Basic usage
+        tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B
+        
+        # Test quantized model
+        tinyinfra benchmark throughput --model models/quantized/Meta-Llama-3-8B-awq-int4
+        
+        # Batch processing
+        tinyinfra benchmark throughput \\
+            --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
+            --batch-size 8 \\
+            --num-tokens 256 \\
+            --num-runs 50
+        
+        # Custom prompt
+        tinyinfra benchmark throughput \\
+            --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
+            --prompt "Write a Python function to" \\
+            --num-tokens 512
+        
+        # With profiling
+        tinyinfra benchmark throughput \\
+            --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
+            --profile \\
+            --output results/awq_profile
+        
+        # CPU inference
+        tinyinfra benchmark throughput \\
+            --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
+            --device cpu
     """
     click.echo(f"\n{'='*60}")
     click.echo("🚀 THROUGHPUT BENCHMARK")
     click.echo(f"{'='*60}")
     
+    click.echo(f"\n📋 Configuration:")
+    click.echo(f"   Model:      {model}")
+    click.echo(f"   Device:     {device}")
+    click.echo(f"   Batch:      {batch_size}")
+    click.echo(f"   Tokens:     {num_tokens}")
+    click.echo(f"   Runs:       {num_runs}")
+    click.echo(f"   Warmup:     {warmup}")
+    click.echo(f"   Prompt:     {prompt[:50]}...")
+    click.echo(f"   Profiling:  {'YES' if profile else 'NO'}")
+    
     # Load model
     click.echo("\n⏳ Loading model...")
     try:
-        llama = Llama3Model(model_name=model)
-        click.echo(f"✅ Loaded: {llama.get_model_size():.1f}GB, {llama.get_memory_usage():.1f}GB mem")
+        # Handle device setting
+        if device == 'auto':
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        llama = Llama3Model(model_name=model, device=device)
+        click.echo(f"✅ Loaded: {llama.get_model_size():.1f}GB")
+        if device == 'cuda':
+            click.echo(f"   Memory: {llama.get_memory_usage():.1f}GB")
     except Exception as e:
         click.echo(f"❌ Failed: {e}", err=True)
         sys.exit(1)
@@ -61,11 +108,13 @@ def throughput(model, batch_size, num_tokens, num_runs, output, profile):
     try:
         bench = ThroughputBenchmark(llama)
         results = bench.run(
+            prompt=prompt,
             batch_size=batch_size,
             num_tokens=num_tokens,
             num_runs=num_runs,
-            enable_profiler=profile,
-            profile_output_dir=output if profile else None
+            warmup_runs=warmup,
+            profile=profile,
+            output_dir=output if profile else None
         )
         
         bench.print_results(results)
@@ -73,6 +122,15 @@ def throughput(model, batch_size, num_tokens, num_runs, output, profile):
         # Save
         Path(output).mkdir(parents=True, exist_ok=True)
         with open(Path(output) / "throughput.json", 'w') as f:
+            # Add config to results
+            results['config'] = {
+                'model': model,
+                'device': device,
+                'batch_size': batch_size,
+                'num_tokens': num_tokens,
+                'num_runs': num_runs,
+                'prompt': prompt
+            }
             json.dump(results, f, indent=2)
         
         click.echo(f"💾 Saved: {output}/throughput.json")
@@ -86,28 +144,66 @@ def throughput(model, batch_size, num_tokens, num_runs, output, profile):
 
 @benchmark.command()
 @click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name or path')
-@click.option('--num-tokens', default=128, type=int, help='Tokens to generate')
-@click.option('--num-runs', default=100, type=int, help='Benchmark runs')
+@click.option('--num-tokens', default=128, type=int, help='Number of tokens to generate')
+@click.option('--num-runs', default=100, type=int, help='Number of benchmark runs')
+@click.option('--warmup', default=5, type=int, help='Number of warmup runs')
+@click.option('--prompt', default='Explain artificial intelligence', help='Input prompt for generation')
 @click.option('--output', default='results/baseline', help='Output directory')
 @click.option('--profile', is_flag=True, help='Enable profiling (lightweight)')
-def latency(model, num_tokens, num_runs, output, profile):
+@click.option('--device', default='cuda', type=click.Choice(['cuda', 'cpu', 'auto']), help='Device to use')
+def latency(model, num_tokens, num_runs, warmup, prompt, output, profile, device):
     """
     Measure latency (response time)
     
-    Example:
-        tinyinfra benchmark latency
-        tinyinfra benchmark latency --profile
-        tinyinfra benchmark latency --num-runs 200
+    \b
+    Examples:
+        # Basic usage
+        tinyinfra benchmark latency --model meta-llama/Meta-Llama-3-8B
+        
+        # Test quantized model
+        tinyinfra benchmark latency --model models/quantized/Meta-Llama-3-8B-awq-int4
+        
+        # More runs for accuracy
+        tinyinfra benchmark latency \\
+            --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
+            --num-runs 200 \\
+            --num-tokens 256
+        
+        # Custom prompt
+        tinyinfra benchmark latency \\
+            --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
+            --prompt "Translate to French:" \\
+            --num-tokens 100
+        
+        # With profiling
+        tinyinfra benchmark latency \\
+            --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
+            --profile \\
+            --output results/awq_latency_profile
     """
     click.echo(f"\n{'='*60}")
     click.echo("⚡ LATENCY BENCHMARK")
     click.echo(f"{'='*60}")
     
+    click.echo(f"\n📋 Configuration:")
+    click.echo(f"   Model:      {model}")
+    click.echo(f"   Device:     {device}")
+    click.echo(f"   Tokens:     {num_tokens}")
+    click.echo(f"   Runs:       {num_runs}")
+    click.echo(f"   Warmup:     {warmup}")
+    click.echo(f"   Prompt:     {prompt[:50]}...")
+    click.echo(f"   Profiling:  {'YES' if profile else 'NO'}")
+    
     # Load model
     click.echo("\n⏳ Loading model...")
     try:
-        llama = Llama3Model(model_name=model)
-        click.echo(f"✅ Loaded: {llama.get_model_size():.1f}GB, {llama.get_memory_usage():.1f}GB mem")
+        if device == 'auto':
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        llama = Llama3Model(model_name=model, device=device)
+        click.echo(f"✅ Loaded: {llama.get_model_size():.1f}GB")
+        if device == 'cuda':
+            click.echo(f"   Memory: {llama.get_memory_usage():.1f}GB")
     except Exception as e:
         click.echo(f"❌ Failed: {e}", err=True)
         sys.exit(1)
@@ -116,10 +212,12 @@ def latency(model, num_tokens, num_runs, output, profile):
     try:
         bench = LatencyBenchmark(llama)
         results = bench.run(
+            prompt=prompt,
             num_tokens=num_tokens,
             num_runs=num_runs,
-            enable_profiler=profile,
-            profile_output_dir=output if profile else None
+            warmup_runs=warmup,
+            profile=profile,
+            output_dir=output if profile else None
         )
         
         bench.print_results(results)
@@ -127,9 +225,142 @@ def latency(model, num_tokens, num_runs, output, profile):
         # Save
         Path(output).mkdir(parents=True, exist_ok=True)
         with open(Path(output) / "latency.json", 'w') as f:
+            results['config'] = {
+                'model': model,
+                'device': device,
+                'num_tokens': num_tokens,
+                'num_runs': num_runs,
+                'prompt': prompt
+            }
             json.dump(results, f, indent=2)
         
         click.echo(f"💾 Saved: {output}/latency.json")
+        
+    except Exception as e:
+        click.echo(f"❌ Failed: {e}", err=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+@benchmark.command()
+@click.option('--model', required=True, help='Model name or path')
+@click.option('--split', default='validation', type=click.Choice(['validation', 'test']), help='Dataset split')
+@click.option('--num-samples', default=None, type=int, help='Number of samples (None = all)')
+@click.option('--subjects', default=None, help='Comma-separated subjects (None = all)')
+@click.option('--output', default='results/accuracy', help='Output directory')
+@click.option('--device', default='cuda', type=click.Choice(['cuda', 'cpu', 'auto']), help='Device')
+def accuracy(model, split, num_samples, subjects, output, device):
+    """
+    Measure model accuracy on MMLU dataset
+    
+    \b
+    Examples:
+        # Quick test (validation set, ~20 min)
+        tinyinfra benchmark accuracy --model meta-llama/Meta-Llama-3-8B
+        
+        # Test quantized model
+        tinyinfra benchmark accuracy --model models/quantized/Meta-Llama-3-8B-awq-int4
+        
+        # Sample 1000 questions for faster testing
+        tinyinfra benchmark accuracy \\
+            --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
+            --num-samples 1000
+        
+        # Test specific subjects
+        tinyinfra benchmark accuracy \\
+            --model meta-llama/Meta-Llama-3-8B \\
+            --subjects "abstract_algebra,astronomy,computer_security"
+        
+        # Full test set (slow, ~3 hours)
+        tinyinfra benchmark accuracy \\
+            --model meta-llama/Meta-Llama-3-8B \\
+            --split test
+    
+    \b
+    Notes:
+        - validation: 1,540 questions (~20 min)
+        - test: 14,083 questions (~3 hours)
+        - Requires: pip install datasets
+    """
+    click.echo(f"\n{'='*60}")
+    click.echo("📊 MMLU ACCURACY BENCHMARK")
+    click.echo(f"{'='*60}")
+    
+    click.echo(f"\n📋 Configuration:")
+    click.echo(f"   Model:      {model}")
+    click.echo(f"   Device:     {device}")
+    click.echo(f"   Split:      {split}")
+    click.echo(f"   Samples:    {num_samples if num_samples else 'all'}")
+    if subjects:
+        click.echo(f"   Subjects:   {subjects}")
+    
+    # Check datasets library
+    try:
+        import datasets
+    except ImportError:
+        click.echo(f"\n❌ 'datasets' library not found!", err=True)
+        click.echo(f"   Install: pip install datasets")
+        sys.exit(1)
+    
+    # Load model
+    click.echo("\n⏳ Loading model...")
+    try:
+        if device == 'auto':
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        llama = Llama3Model(model_name=model, device=device)
+        click.echo(f"✅ Loaded: {llama.get_model_size():.1f}GB")
+        if device == 'cuda':
+            click.echo(f"   Memory: {llama.get_memory_usage():.1f}GB")
+    except Exception as e:
+        click.echo(f"❌ Failed: {e}", err=True)
+        sys.exit(1)
+    
+    # Parse subjects
+    subject_list = None
+    if subjects:
+        subject_list = [s.strip() for s in subjects.split(',')]
+    
+    # Run benchmark
+    try:
+        bench = AccuracyBenchmark(llama)
+        
+        results = bench.run(
+            split=split,
+            num_samples=num_samples,
+            subjects=subject_list
+        )
+        
+        bench.print_results(results)
+        
+        # Save
+        Path(output).mkdir(parents=True, exist_ok=True)
+        with open(Path(output) / f"accuracy_{split}.json", 'w') as f:
+            # Save simplified results
+            save_results = {
+                'overall_accuracy': results['overall_accuracy'],
+                'correct': results['correct'],
+                'total': results['total'],
+                'split': split,
+                'model': model,
+                'num_samples': num_samples,
+                'top_10_subjects': {}
+            }
+            
+            # Add top 10 subjects
+            sorted_subjects = sorted(
+                results['subject_accuracies'].items(),
+                key=lambda x: x[1]['accuracy'],
+                reverse=True
+            )[:10]
+            
+            for subject, stats in sorted_subjects:
+                save_results['top_10_subjects'][subject] = stats
+            
+            json.dump(save_results, f, indent=2)
+        
+        click.echo(f"💾 Saved: {output}/accuracy_{split}.json")
         
     except Exception as e:
         click.echo(f"❌ Failed: {e}", err=True)
@@ -143,11 +374,12 @@ def latency(model, num_tokens, num_runs, output, profile):
 @click.option('--output', default='results/baseline', help='Output directory')
 def all(model, output):
     """
-    Run all benchmarks
+    Run all benchmarks (throughput + latency)
     
+    \b
     Example:
         tinyinfra benchmark all
-        tinyinfra benchmark all --model models/quantized/llama3-gptq-int8
+        tinyinfra benchmark all --model models/quantized/Meta-Llama-3-8B-awq-int4
     """
     click.echo(f"\n{'='*60}")
     click.echo("🎯 FULL BENCHMARK")
@@ -182,133 +414,6 @@ def all(model, output):
         sys.exit(1)
 
 
-@benchmark.command()
-@click.option('--baseline', required=True, help='Baseline model path')
-@click.option('--optimized', required=True, help='Optimized model path')
-@click.option('--output', default='results/comparison', help='Output directory')
-@click.option('--num-runs', default=20, type=int, help='Number of runs per benchmark')
-def compare(baseline, optimized, output, num_runs):
-    """
-    Compare two models (baseline vs optimized)
-    
-    Example:
-        tinyinfra benchmark compare \\
-            --baseline meta-llama/Meta-Llama-3-8B \\
-            --optimized models/quantized/Meta-Llama-3-8B-gptq-int8
-    """
-    click.echo(f"\n{'='*60}")
-    click.echo("📊 MODEL COMPARISON")
-    click.echo(f"{'='*60}")
-    click.echo(f"Baseline:  {baseline}")
-    click.echo(f"Optimized: {optimized}")
-    click.echo(f"Runs:      {num_runs}")
-    
-    results = {}
-    
-    try:
-        # Test baseline
-        click.echo(f"\n[1/2] Testing baseline...")
-        model_base = Llama3Model(model_name=baseline)
-        
-        bench_tp = ThroughputBenchmark(model_base)
-        results['baseline_throughput'] = bench_tp.run(num_runs=num_runs)
-        
-        bench_lat = LatencyBenchmark(model_base)
-        results['baseline_latency'] = bench_lat.run(num_runs=num_runs * 5)
-        
-        results['baseline_size_gb'] = model_base.get_model_size()
-        results['baseline_memory_gb'] = model_base.get_memory_usage()
-        
-        # Clean up
-        del model_base
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
-        
-        # Test optimized
-        click.echo(f"\n[2/2] Testing optimized...")
-        model_opt = Llama3Model(model_name=optimized)
-        
-        bench_tp_opt = ThroughputBenchmark(model_opt)
-        results['optimized_throughput'] = bench_tp_opt.run(num_runs=num_runs)
-        
-        bench_lat_opt = LatencyBenchmark(model_opt)
-        results['optimized_latency'] = bench_lat_opt.run(num_runs=num_runs * 5)
-        
-        results['optimized_size_gb'] = model_opt.get_model_size()
-        results['optimized_memory_gb'] = model_opt.get_memory_usage()
-        
-        # Print comparison
-        _print_comparison(results)
-        
-        # Save
-        Path(output).mkdir(parents=True, exist_ok=True)
-        with open(Path(output) / "comparison.json", 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        click.echo(f"\n💾 Saved: {output}/comparison.json")
-        
-    except Exception as e:
-        click.echo(f"❌ Failed: {e}", err=True)
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-
-
-def _print_comparison(results):
-    """Pretty print comparison"""
-    print(f"\n{'='*75}")
-    print(f"📊 COMPARISON RESULTS")
-    print(f"{'='*75}")
-    
-    base_tp = results['baseline_throughput']['throughput_tokens_per_sec']
-    opt_tp = results['optimized_throughput']['throughput_tokens_per_sec']
-    
-    base_lat = results['baseline_latency']['end_to_end']['mean_ms']
-    opt_lat = results['optimized_latency']['end_to_end']['mean_ms']
-    
-    base_size = results['baseline_size_gb']
-    opt_size = results['optimized_size_gb']
-    
-    base_mem = results['baseline_memory_gb']
-    opt_mem = results['optimized_memory_gb']
-    
-    print(f"\n{'Metric':<30} {'Baseline':<15} {'Optimized':<15} {'Change':<15}")
-    print(f"{'-'*75}")
-    print(f"{'Throughput (tok/s)':<30} {base_tp:<15.2f} {opt_tp:<15.2f} {_percent_change(opt_tp, base_tp):<15}")
-    print(f"{'Latency (ms)':<30} {base_lat:<15.2f} {opt_lat:<15.2f} {_percent_change(opt_lat, base_lat, inverse=True):<15}")
-    print(f"{'Model Size (GB)':<30} {base_size:<15.2f} {opt_size:<15.2f} {_percent_change(opt_size, base_size, inverse=True):<15}")
-    print(f"{'Memory Usage (GB)':<30} {base_mem:<15.2f} {opt_mem:<15.2f} {_percent_change(opt_mem, base_mem, inverse=True):<15}")
-    
-    print(f"\n{'='*75}")
-    
-    # Summary
-    avg_speedup = ((opt_tp / base_tp) + (base_lat / opt_lat)) / 2
-    size_reduction = (1 - opt_size / base_size) * 100
-    
-    print(f"\n📈 Summary:")
-    print(f"   Average Speedup:  {avg_speedup:.2f}x")
-    print(f"   Size Reduction:   {size_reduction:.1f}%")
-    print(f"   Memory Savings:   {(1 - opt_mem / base_mem) * 100:.1f}%")
-    print(f"\n{'='*75}\n")
-
-
-def _percent_change(new, old, inverse=False):
-    """Calculate percentage change with arrow"""
-    if old == 0:
-        return "N/A"
-    
-    change = ((new - old) / old) * 100
-    
-    # Determine if improvement
-    if inverse:
-        is_better = change < 0
-    else:
-        is_better = change > 0
-    
-    symbol = "✓" if is_better else "✗"
-    arrow = "↑" if change > 0 else "↓"
-    
-    return f"{symbol} {arrow} {abs(change):.1f}%"
-
 # ============================================================
 # QUANTIZATION COMMANDS
 # ============================================================
@@ -326,11 +431,34 @@ def quantize():
 @click.option('--group-size', default=128, type=int, help='Group size')
 def awq(model, bits, output, group_size):
     """
-    Quantize with AWQ (recommended for 4-bit)
+    Quantize with AWQ (Activation-aware Weight Quantization)
     
-    Example:
+    AWQ is recommended for 4-bit quantization with minimal accuracy loss.
+    
+    \b
+    Examples:
+        # 4-bit quantization (recommended)
         tinyinfra quantize awq --model meta-llama/Meta-Llama-3-8B --bits 4
+        
+        # 8-bit quantization
         tinyinfra quantize awq --model meta-llama/Meta-Llama-3-8B --bits 8
+        
+        # Custom output directory
+        tinyinfra quantize awq \\
+            --model meta-llama/Meta-Llama-3-8B \\
+            --bits 4 \\
+            --output my_models/quantized
+        
+        # Custom group size (default 128)
+        tinyinfra quantize awq \\
+            --model meta-llama/Meta-Llama-3-8B \\
+            --bits 4 \\
+            --group-size 64
+    
+    \b
+    After quantization, test performance:
+        tinyinfra benchmark throughput --model models/quantized/Meta-Llama-3-8B-awq-int4
+        tinyinfra benchmark accuracy --model models/quantized/Meta-Llama-3-8B-awq-int4
     """
     from .quantization.quantizer import AWQQuantizer
     
@@ -342,14 +470,22 @@ def awq(model, bits, output, group_size):
             group_size=group_size
         )
         
-        click.echo(f"\n✅ Done! Next steps:")
-        click.echo(f"   # Test performance")
+        click.echo(f"\n" + "="*60)
+        click.echo("✅ QUANTIZATION COMPLETE")
+        click.echo("="*60)
+        click.echo(f"\nQuantized model: {output_path}")
+        
+        click.echo(f"\n📋 Next Steps:")
+        click.echo(f"\n1️⃣  Test performance:")
         click.echo(f"   tinyinfra benchmark throughput --model {output_path}")
-        click.echo(f"")
-        click.echo(f"   # Compare with baseline")
-        click.echo(f"   tinyinfra benchmark compare \\")
-        click.echo(f"       --baseline {model} \\")
-        click.echo(f"       --optimized {output_path}")
+        
+        click.echo(f"\n2️⃣  Test accuracy:")
+        click.echo(f"   tinyinfra benchmark accuracy --model {output_path}")
+        
+        click.echo(f"\n3️⃣  Test latency:")
+        click.echo(f"   tinyinfra benchmark latency --model {output_path}")
+        
+        click.echo(f"\n" + "="*60 + "\n")
         
     except Exception as e:
         click.echo(f"\n❌ Quantization failed: {e}", err=True)
@@ -366,9 +502,18 @@ def bnb(model, bits, output):
     """
     Quantize with BitsAndBytes (simple, fast)
     
-    Example:
+    \b
+    Examples:
+        # 8-bit quantization
         tinyinfra quantize bnb --model meta-llama/Meta-Llama-3-8B --bits 8
+        
+        # 4-bit quantization
         tinyinfra quantize bnb --model meta-llama/Meta-Llama-3-8B --bits 4
+    
+    \b
+    After quantization, test performance:
+        tinyinfra benchmark throughput --model models/quantized/Meta-Llama-3-8B-bnb-int8
+        tinyinfra benchmark accuracy --model models/quantized/Meta-Llama-3-8B-bnb-int8
     """
     from .quantization.quantizer import BitsAndBytesQuantizer
     
@@ -379,14 +524,22 @@ def bnb(model, bits, output):
             output_dir=output
         )
         
-        click.echo(f"\n✅ Done! Next steps:")
-        click.echo(f"   # Test performance")
+        click.echo(f"\n" + "="*60)
+        click.echo("✅ QUANTIZATION COMPLETE")
+        click.echo("="*60)
+        click.echo(f"\nQuantized model: {output_path}")
+        
+        click.echo(f"\n📋 Next Steps:")
+        click.echo(f"\n1️⃣  Test performance:")
         click.echo(f"   tinyinfra benchmark throughput --model {output_path}")
-        click.echo(f"")
-        click.echo(f"   # Compare with baseline")
-        click.echo(f"   tinyinfra benchmark compare \\")
-        click.echo(f"       --baseline {model} \\")
-        click.echo(f"       --optimized {output_path}")
+        
+        click.echo(f"\n2️⃣  Test accuracy:")
+        click.echo(f"   tinyinfra benchmark accuracy --model {output_path}")
+        
+        click.echo(f"\n3️⃣  Test latency:")
+        click.echo(f"   tinyinfra benchmark latency --model {output_path}")
+        
+        click.echo(f"\n" + "="*60 + "\n")
         
     except Exception as e:
         click.echo(f"\n❌ Quantization failed: {e}", err=True)
@@ -423,16 +576,96 @@ def info():
         click.echo(f"   ✅ autoawq: installed")
     except ImportError:
         click.echo(f"   ❌ autoawq: Not installed")
-        click.echo(f"      Install: uv pip install autoawq")
+        click.echo(f"      Install: pip install autoawq")
     
     try:
         import bitsandbytes
         click.echo(f"   ✅ bitsandbytes: {bitsandbytes.__version__}")
     except ImportError:
         click.echo(f"   ❌ bitsandbytes: Not installed")
-        click.echo(f"      Install: uv pip install bitsandbytes")
+        click.echo(f"      Install: pip install bitsandbytes")
+    
+    # Check datasets
+    click.echo(f"\n📚 Datasets:")
+    try:
+        import datasets
+        click.echo(f"   ✅ datasets: {datasets.__version__}")
+    except ImportError:
+        click.echo(f"   ❌ datasets: Not installed")
+        click.echo(f"      Install: pip install datasets")
     
     click.echo()
+
+
+# ============================================================
+# QUICKSTART COMMAND
+# ============================================================
+
+@cli.command()
+@click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model to use')
+def quickstart(model):
+    """
+    Quick start guide with example commands
+    
+    Shows common workflows and example commands.
+    """
+    click.echo(f"\n{'='*70}")
+    click.echo("🚀 TINYINFRA QUICK START")
+    click.echo(f"{'='*70}")
+    
+    click.echo(f"\n📋 STEP 1: Check your system")
+    click.echo(f"   tinyinfra info")
+    
+    click.echo(f"\n📋 STEP 2: Run baseline benchmark")
+    click.echo(f"   tinyinfra benchmark throughput --model {model}")
+    click.echo(f"   tinyinfra benchmark latency --model {model}")
+    click.echo(f"   tinyinfra benchmark accuracy --model {model}")
+    
+    click.echo(f"\n📋 STEP 3: Quantize model (AWQ 4-bit recommended)")
+    click.echo(f"   tinyinfra quantize awq --model {model} --bits 4")
+    
+    click.echo(f"\n📋 STEP 4: Test quantized model")
+    model_name = Path(model).name
+    quantized_path = f"models/quantized/{model_name}-awq-int4"
+    click.echo(f"   tinyinfra benchmark throughput --model {quantized_path}")
+    click.echo(f"   tinyinfra benchmark accuracy --model {quantized_path}")
+    
+    click.echo(f"\n{'='*70}")
+    click.echo("📚 More Examples:")
+    click.echo(f"{'='*70}")
+    
+    click.echo(f"\n🔧 Different quantization methods:")
+    click.echo(f"   # AWQ (best for 4-bit)")
+    click.echo(f"   tinyinfra quantize awq --model {model} --bits 4")
+    click.echo(f"")
+    click.echo(f"   # BitsAndBytes (simple, fast)")
+    click.echo(f"   tinyinfra quantize bnb --model {model} --bits 8")
+    
+    click.echo(f"\n📊 Advanced profiling:")
+    click.echo(f"   # With PyTorch profiler")
+    click.echo(f"   tinyinfra benchmark throughput --model {model} --profile")
+    click.echo(f"")
+    click.echo(f"   # Custom parameters")
+    click.echo(f"   tinyinfra benchmark throughput \\")
+    click.echo(f"       --model {model} \\")
+    click.echo(f"       --batch-size 8 \\")
+    click.echo(f"       --num-runs 50")
+    
+    click.echo(f"\n📊 Accuracy testing:")
+    click.echo(f"   # Quick validation (1,540 questions)")
+    click.echo(f"   tinyinfra benchmark accuracy --model {quantized_path}")
+    click.echo(f"")
+    click.echo(f"   # Sample 1000 for faster testing")
+    click.echo(f"   tinyinfra benchmark accuracy --model {quantized_path} --num-samples 1000")
+    
+    click.echo(f"\n💡 Tips:")
+    click.echo(f"   - Use --help on any command for details")
+    click.echo(f"   - AWQ 4-bit: Best balance of size/speed/accuracy")
+    click.echo(f"   - BnB 8-bit: Safest option with minimal accuracy loss")
+    click.echo(f"   - BnB 4-bit: Most aggressive compression")
+    click.echo(f"   - Accuracy testing: validation set is usually sufficient")
+    
+    click.echo(f"\n{'='*70}\n")
 
 
 if __name__ == '__main__':
