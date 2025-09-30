@@ -7,7 +7,8 @@ import json
 from pathlib import Path
 import torch
 
-from .model.llama3 import Llama3Model
+from .model.hf.llama3_hf import Llama3HF
+from .model.customized.llama3_customized import Llama3Customized
 from .benchmark.throughput import ThroughputBenchmark
 from .benchmark.latency import LatencyBenchmark
 from .benchmark.accuracy import AccuracyBenchmark
@@ -31,6 +32,7 @@ def benchmark():
 
 @benchmark.command()
 @click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name or path')
+@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized']), help='Model wrapper to use')
 @click.option('--batch-size', default=1, type=int, help='Batch size')
 @click.option('--num-tokens', default=128, type=int, help='Number of tokens to generate')
 @click.option('--num-runs', default=10, type=int, help='Number of benchmark runs')
@@ -39,41 +41,49 @@ def benchmark():
 @click.option('--output', default='results/baseline', help='Output directory')
 @click.option('--profile', is_flag=True, help='Enable profiling (lightweight)')
 @click.option('--device', default='cuda', type=click.Choice(['cuda', 'cpu', 'auto']), help='Device to use')
-def throughput(model, batch_size, num_tokens, num_runs, warmup, prompt, output, profile, device):
+def throughput(model, wrapper, batch_size, num_tokens, num_runs, warmup, prompt, output, profile, device):
     """
     Measure throughput (tokens/second)
-    
+
     \b
     Examples:
-        # Basic usage
+        # Basic usage (default HF wrapper)
         tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B
-        
+
+        # Use specific wrapper
+        tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper hf
+
         # Test quantized model
         tinyinfra benchmark throughput --model models/quantized/Meta-Llama-3-8B-awq-int4
-        
+
         # Batch processing
         tinyinfra benchmark throughput \\
             --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
             --batch-size 8 \\
             --num-tokens 256 \\
             --num-runs 50
-        
+
         # Custom prompt
         tinyinfra benchmark throughput \\
             --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
             --prompt "Write a Python function to" \\
             --num-tokens 512
-        
+
         # With profiling
         tinyinfra benchmark throughput \\
             --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
             --profile \\
             --output results/awq_profile
-        
+
         # CPU inference
         tinyinfra benchmark throughput \\
             --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
             --device cpu
+
+    \b
+    Wrappers:
+        hf          - HuggingFace-based wrapper (default)
+        customized  - Custom implementation wrapper (in development)
     """
     click.echo(f"\n{'='*60}")
     click.echo("🚀 THROUGHPUT BENCHMARK")
@@ -81,6 +91,7 @@ def throughput(model, batch_size, num_tokens, num_runs, warmup, prompt, output, 
     
     click.echo(f"\n📋 Configuration:")
     click.echo(f"   Model:      {model}")
+    click.echo(f"   Wrapper:    {wrapper}")
     click.echo(f"   Device:     {device}")
     click.echo(f"   Batch:      {batch_size}")
     click.echo(f"   Tokens:     {num_tokens}")
@@ -88,33 +99,40 @@ def throughput(model, batch_size, num_tokens, num_runs, warmup, prompt, output, 
     click.echo(f"   Warmup:     {warmup}")
     click.echo(f"   Prompt:     {prompt[:50]}...")
     click.echo(f"   Profiling:  {'YES' if profile else 'NO'}")
-    
+
     # Load model
     click.echo("\n⏳ Loading model...")
     try:
         # Handle device setting
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        
-        llama = Llama3Model(model_name=model, device=device)
-        click.echo(f"✅ Loaded: {llama.get_model_size():.1f}GB")
+
+        # Select wrapper
+        if wrapper == 'hf':
+            model_instance = Llama3HF(model_name=model, device=device)
+        elif wrapper == 'customized':
+            model_instance = Llama3Customized(model_name=model, device=device)
+        else:
+            raise ValueError(f"Unknown wrapper: {wrapper}")
+
+        click.echo(f"✅ Loaded: {model_instance.get_model_size():.1f}GB")
         if device == 'cuda':
-            click.echo(f"   Memory: {llama.get_memory_usage():.1f}GB")
+            click.echo(f"   Memory: {model_instance.get_memory_usage():.1f}GB")
     except Exception as e:
         click.echo(f"❌ Failed: {e}", err=True)
         sys.exit(1)
     
     # Benchmark
     try:
-        bench = ThroughputBenchmark(llama)
+        bench = ThroughputBenchmark(model_instance)
         results = bench.run(
             prompt=prompt,
             batch_size=batch_size,
             num_tokens=num_tokens,
             num_runs=num_runs,
             warmup_runs=warmup,
-            profile=profile,
-            output_dir=output if profile else None
+            enable_profiler=profile,
+            profile_output_dir=output if profile else None
         )
         
         bench.print_results(results)
@@ -125,6 +143,7 @@ def throughput(model, batch_size, num_tokens, num_runs, warmup, prompt, output, 
             # Add config to results
             results['config'] = {
                 'model': model,
+                'wrapper': wrapper,
                 'device': device,
                 'batch_size': batch_size,
                 'num_tokens': num_tokens,
@@ -144,6 +163,7 @@ def throughput(model, batch_size, num_tokens, num_runs, warmup, prompt, output, 
 
 @benchmark.command()
 @click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name or path')
+@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized']), help='Model wrapper to use')
 @click.option('--num-tokens', default=128, type=int, help='Number of tokens to generate')
 @click.option('--num-runs', default=100, type=int, help='Number of benchmark runs')
 @click.option('--warmup', default=5, type=int, help='Number of warmup runs')
@@ -151,35 +171,43 @@ def throughput(model, batch_size, num_tokens, num_runs, warmup, prompt, output, 
 @click.option('--output', default='results/baseline', help='Output directory')
 @click.option('--profile', is_flag=True, help='Enable profiling (lightweight)')
 @click.option('--device', default='cuda', type=click.Choice(['cuda', 'cpu', 'auto']), help='Device to use')
-def latency(model, num_tokens, num_runs, warmup, prompt, output, profile, device):
+def latency(model, wrapper, num_tokens, num_runs, warmup, prompt, output, profile, device):
     """
     Measure latency (response time)
-    
+
     \b
     Examples:
-        # Basic usage
+        # Basic usage (default HF wrapper)
         tinyinfra benchmark latency --model meta-llama/Meta-Llama-3-8B
-        
+
+        # Use specific wrapper
+        tinyinfra benchmark latency --model meta-llama/Meta-Llama-3-8B --wrapper hf
+
         # Test quantized model
         tinyinfra benchmark latency --model models/quantized/Meta-Llama-3-8B-awq-int4
-        
+
         # More runs for accuracy
         tinyinfra benchmark latency \\
             --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
             --num-runs 200 \\
             --num-tokens 256
-        
+
         # Custom prompt
         tinyinfra benchmark latency \\
             --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
             --prompt "Translate to French:" \\
             --num-tokens 100
-        
+
         # With profiling
         tinyinfra benchmark latency \\
             --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
             --profile \\
             --output results/awq_latency_profile
+
+    \b
+    Wrappers:
+        hf          - HuggingFace-based wrapper (default)
+        customized  - Custom implementation wrapper (in development)
     """
     click.echo(f"\n{'='*60}")
     click.echo("⚡ LATENCY BENCHMARK")
@@ -187,37 +215,45 @@ def latency(model, num_tokens, num_runs, warmup, prompt, output, profile, device
     
     click.echo(f"\n📋 Configuration:")
     click.echo(f"   Model:      {model}")
+    click.echo(f"   Wrapper:    {wrapper}")
     click.echo(f"   Device:     {device}")
     click.echo(f"   Tokens:     {num_tokens}")
     click.echo(f"   Runs:       {num_runs}")
     click.echo(f"   Warmup:     {warmup}")
     click.echo(f"   Prompt:     {prompt[:50]}...")
     click.echo(f"   Profiling:  {'YES' if profile else 'NO'}")
-    
+
     # Load model
     click.echo("\n⏳ Loading model...")
     try:
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        
-        llama = Llama3Model(model_name=model, device=device)
-        click.echo(f"✅ Loaded: {llama.get_model_size():.1f}GB")
+
+        # Select wrapper
+        if wrapper == 'hf':
+            model_instance = Llama3HF(model_name=model, device=device)
+        elif wrapper == 'customized':
+            model_instance = Llama3Customized(model_name=model, device=device)
+        else:
+            raise ValueError(f"Unknown wrapper: {wrapper}")
+
+        click.echo(f"✅ Loaded: {model_instance.get_model_size():.1f}GB")
         if device == 'cuda':
-            click.echo(f"   Memory: {llama.get_memory_usage():.1f}GB")
+            click.echo(f"   Memory: {model_instance.get_memory_usage():.1f}GB")
     except Exception as e:
         click.echo(f"❌ Failed: {e}", err=True)
         sys.exit(1)
     
     # Benchmark
     try:
-        bench = LatencyBenchmark(llama)
+        bench = LatencyBenchmark(model_instance)
         results = bench.run(
             prompt=prompt,
             num_tokens=num_tokens,
             num_runs=num_runs,
             warmup_runs=warmup,
-            profile=profile,
-            output_dir=output if profile else None
+            enable_profiler=profile,
+            profile_output_dir=output if profile else None
         )
         
         bench.print_results(results)
@@ -227,6 +263,7 @@ def latency(model, num_tokens, num_runs, warmup, prompt, output, profile, device
         with open(Path(output) / "latency.json", 'w') as f:
             results['config'] = {
                 'model': model,
+                'wrapper': wrapper,
                 'device': device,
                 'num_tokens': num_tokens,
                 'num_runs': num_runs,
@@ -245,43 +282,52 @@ def latency(model, num_tokens, num_runs, warmup, prompt, output, profile, device
 
 @benchmark.command()
 @click.option('--model', required=True, help='Model name or path')
+@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized']), help='Model wrapper to use')
 @click.option('--split', default='validation', type=click.Choice(['validation', 'test']), help='Dataset split')
 @click.option('--num-samples', default=None, type=int, help='Number of samples (None = all)')
 @click.option('--subjects', default=None, help='Comma-separated subjects (None = all)')
 @click.option('--output', default='results/accuracy', help='Output directory')
 @click.option('--device', default='cuda', type=click.Choice(['cuda', 'cpu', 'auto']), help='Device')
-def accuracy(model, split, num_samples, subjects, output, device):
+def accuracy(model, wrapper, split, num_samples, subjects, output, device):
     """
     Measure model accuracy on MMLU dataset
-    
+
     \b
     Examples:
-        # Quick test (validation set, ~20 min)
+        # Quick test (validation set, ~20 min, default HF wrapper)
         tinyinfra benchmark accuracy --model meta-llama/Meta-Llama-3-8B
-        
+
+        # Use specific wrapper
+        tinyinfra benchmark accuracy --model meta-llama/Meta-Llama-3-8B --wrapper hf
+
         # Test quantized model
         tinyinfra benchmark accuracy --model models/quantized/Meta-Llama-3-8B-awq-int4
-        
+
         # Sample 1000 questions for faster testing
         tinyinfra benchmark accuracy \\
             --model models/quantized/Meta-Llama-3-8B-awq-int4 \\
             --num-samples 1000
-        
+
         # Test specific subjects
         tinyinfra benchmark accuracy \\
             --model meta-llama/Meta-Llama-3-8B \\
             --subjects "abstract_algebra,astronomy,computer_security"
-        
+
         # Full test set (slow, ~3 hours)
         tinyinfra benchmark accuracy \\
             --model meta-llama/Meta-Llama-3-8B \\
             --split test
-    
+
     \b
     Notes:
         - validation: 1,540 questions (~20 min)
         - test: 14,083 questions (~3 hours)
         - Requires: pip install datasets
+
+    \b
+    Wrappers:
+        hf          - HuggingFace-based wrapper (default)
+        customized  - Custom implementation wrapper (in development)
     """
     click.echo(f"\n{'='*60}")
     click.echo("📊 MMLU ACCURACY BENCHMARK")
@@ -289,12 +335,13 @@ def accuracy(model, split, num_samples, subjects, output, device):
     
     click.echo(f"\n📋 Configuration:")
     click.echo(f"   Model:      {model}")
+    click.echo(f"   Wrapper:    {wrapper}")
     click.echo(f"   Device:     {device}")
     click.echo(f"   Split:      {split}")
     click.echo(f"   Samples:    {num_samples if num_samples else 'all'}")
     if subjects:
         click.echo(f"   Subjects:   {subjects}")
-    
+
     # Check datasets library
     try:
         import datasets
@@ -302,17 +349,24 @@ def accuracy(model, split, num_samples, subjects, output, device):
         click.echo(f"\n❌ 'datasets' library not found!", err=True)
         click.echo(f"   Install: pip install datasets")
         sys.exit(1)
-    
+
     # Load model
     click.echo("\n⏳ Loading model...")
     try:
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        
-        llama = Llama3Model(model_name=model, device=device)
-        click.echo(f"✅ Loaded: {llama.get_model_size():.1f}GB")
+
+        # Select wrapper
+        if wrapper == 'hf':
+            model_instance = Llama3HF(model_name=model, device=device)
+        elif wrapper == 'customized':
+            model_instance = Llama3Customized(model_name=model, device=device)
+        else:
+            raise ValueError(f"Unknown wrapper: {wrapper}")
+
+        click.echo(f"✅ Loaded: {model_instance.get_model_size():.1f}GB")
         if device == 'cuda':
-            click.echo(f"   Memory: {llama.get_memory_usage():.1f}GB")
+            click.echo(f"   Memory: {model_instance.get_memory_usage():.1f}GB")
     except Exception as e:
         click.echo(f"❌ Failed: {e}", err=True)
         sys.exit(1)
@@ -324,8 +378,8 @@ def accuracy(model, split, num_samples, subjects, output, device):
     
     # Run benchmark
     try:
-        bench = AccuracyBenchmark(llama)
-        
+        bench = AccuracyBenchmark(model_instance)
+
         results = bench.run(
             split=split,
             num_samples=num_samples,
@@ -344,6 +398,7 @@ def accuracy(model, split, num_samples, subjects, output, device):
                 'total': results['total'],
                 'split': split,
                 'model': model,
+                'wrapper': wrapper,
                 'num_samples': num_samples,
                 'top_10_subjects': {}
             }
@@ -371,32 +426,50 @@ def accuracy(model, split, num_samples, subjects, output, device):
 
 @benchmark.command()
 @click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name or path')
+@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized']), help='Model wrapper to use')
 @click.option('--output', default='results/baseline', help='Output directory')
-def all(model, output):
+def all(model, wrapper, output):
     """
     Run all benchmarks (throughput + latency)
-    
+
     \b
-    Example:
+    Examples:
+        # Run with default HF wrapper
         tinyinfra benchmark all
+
+        # Run with specific wrapper
+        tinyinfra benchmark all --wrapper hf
+
+        # Run on quantized model
         tinyinfra benchmark all --model models/quantized/Meta-Llama-3-8B-awq-int4
+
+    \b
+    Wrappers:
+        hf          - HuggingFace-based wrapper (default)
+        customized  - Custom implementation wrapper (in development)
     """
     click.echo(f"\n{'='*60}")
     click.echo("🎯 FULL BENCHMARK")
     click.echo(f"{'='*60}")
-    
+
     try:
-        llama = Llama3Model(model_name=model)
+        # Select wrapper
+        if wrapper == 'hf':
+            model_instance = Llama3HF(model_name=model)
+        elif wrapper == 'customized':
+            model_instance = Llama3Customized(model_name=model)
+        else:
+            raise ValueError(f"Unknown wrapper: {wrapper}")
         
         # Throughput
         click.echo("\n[1/2] Throughput...")
-        bench_tp = ThroughputBenchmark(llama)
+        bench_tp = ThroughputBenchmark(model_instance)
         res_tp = bench_tp.run(num_runs=20)
         bench_tp.print_results(res_tp)
-        
+
         # Latency
         click.echo("\n[2/2] Latency...")
-        bench_lat = LatencyBenchmark(llama)
+        bench_lat = LatencyBenchmark(model_instance)
         res_lat = bench_lat.run(num_runs=100)
         bench_lat.print_results(res_lat)
         
