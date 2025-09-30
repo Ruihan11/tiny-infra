@@ -14,26 +14,6 @@ hf auth login with your token
 python model.py
 ```
 
-## roadmap
-Llama-3-8B End-to-End Inference Optimization
-> Understand bottlenecks → Targeted optimization → Validate results  
-
-Phase 1: Performance Profiling (Week 1-2)  
-- [x] Establish performance baseline (latency, throughput, memory, accuracy)
-- [x] PyTorch Profiler for operator-level analysis
-- [ ] Nsight Systems for GPU activity analysis (TODO)
-
-Deliverables: Bottleneck diagnosis report
-
-Phase 2: Model Quantization (Week 3-5)
-
-- [ ] Learn quantization principles (INT8/INT4)
-- [ ] AutoGPTQ quantization practice
-- [ ] Compare AWQ/bitsandbytes approaches
-- [ ] Diagnose and optimize accuracy loss
-- [ ] Mixed precision strategy (sensitive layers in FP16)
-- [ ] Quantization scheme performance comparison
-
 ```bash
 tinyinfra quantize awq --model meta-llama/Meta-Llama-3-8B --bits 4
 
@@ -57,40 +37,52 @@ tinyinfra benchmark throughput --model models/quantized/Meta-Llama-3-8B-bnb-int8
 |Throughput(token/sec)  |229.91|152.68|112.59|66.09|
 |Mean Latency(ms)       |8907.83|13413.59|18190.15|30988.62|
 
-Deliverables: Optimized quantized model + Quantization engineering report
+## roadmap
+Llama-3-8B End-to-End Inference Optimization
+> Understand bottlenecks → Targeted optimization → Validate results  
 
-Phase 3: TensorRT Deployment (Week 6-7)
+Phase 1: Performance Profiling (Week 1-2)
 
-- [ ] Convert PyTorch → ONNX → TensorRT
-- [ ] Handle dynamic shapes and KV Cache
-- [ ] Tune FP16/INT8 precision
-- [ ] TensorRT Profiler analysis
+- [x] Establish baseline metrics (latency, throughput, memory, accuracy)
+- [x] PyTorch Profiler for operator-level analysis
+- [ ] Nsight Systems for GPU kernel analysis (Maybe for future reference)
+- [x] Custom vs HuggingFace implementation comparison
+
+Phase 2: Model Quantization (Week 3-5)
+
+- [x] AWQ INT4 quantization implementation
+- [x] BitsAndBytes INT4/INT8 quantization
+- [x] Performance benchmarking (A40 GPU)
+- [x] Accuracy evaluation metrics
+- [ ] Mixed precision strategies (sensitive layers in FP16)
+- [ ] Per-channel vs per-tensor quantization comparison
+- [ ] GPTQ quantization integration
+- [ ] Quantization-aware training experiments
+
+Phase 3: Custom Implementation Optimization (Week 6-7)
+
+- [x] Separate HuggingFace and custom implementations
+- [x] Pure PyTorch Llama3 with RoPE and GQA
+- [ ] Implement KV cache for inference
+- [ ] Flash Attention integration
+- [ ] Fused kernel operations (RMSNorm + Attention)
+- [ ] Memory-efficient attention patterns
+- [ ] Benchmark custom vs HuggingFace
+
+Phase 4: TensorRT Deployment (Week 8-9)
+
+- [ ] PyTorch → ONNX → TensorRT conversion pipeline
+- [ ] Handle dynamic shapes and KV cache
+- [ ] FP16/INT8 TensorRT precision tuning
+- [ ] TensorRT layer fusion optimization
+- [ ] Profile with TensorRT Profiler
 - [ ] Identify TensorRT limitations
 
-Deliverables: TensorRT engine + Performance improvement report
-
-Phase 4: Kernel Optimization (Week 8-9)
+Phase 5: Kernel Optimization (Week 10-11)
 
 - [ ] Learn Triton programming (Vector Add → GEMM → Softmax)
-- [ ] Flash Attention integration and optimization
-- [ ] Custom operator fusion (SwiGLU/RMSNorm)
+- [ ] Flash Attention 2/3 integration
+- [ ] Custom operator fusion (SwiGLU, RMSNorm, QKV projection)
 - [ ] Roofline model analysis
 - [ ] Performance tuning (BLOCK_SIZE, num_warps)
-
-Deliverables: Optimized kernel library + Performance analysis report
-
-Phase 5: Production Service (Week 10-11)
-
-- [ ] FastAPI service (with streaming support)
-- [ ] Dynamic batching implementation
-- [ ] Prometheus + Grafana monitoring
-- [ ] Load testing (locust)
-- [ ] Stability guarantees (rate limiting, circuit breaking, graceful degradation)
-
-Deliverables: Deployable inference service + Monitoring system
-
-Phase 6: Documentation & Open Source (Week 12)
-
-- [ ] Generate final performance comparison table
-- [ ] Complete technical documentation (README + detailed guides)
-- [ ] technical blog posts
+- [ ] Quantized GEMM kernels
