@@ -39,7 +39,6 @@ class RotaryEmbedding(nn.Module):
 def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Apply rotary embeddings to input tensor"""
     x1, x2 = x.chunk(2, dim=-1)
-    # Take only the first half to match x1/x2 dimensions
     d = x1.shape[-1]
     return torch.cat([
         x1 * cos[..., :d] - x2 * sin[..., :d],
@@ -64,7 +63,7 @@ class Attention(nn.Module):
 
         self.rotary_emb = RotaryEmbedding(self.head_dim, max_seq_len)
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, start_pos: int = 0) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
 
         # Project to Q, K, V
@@ -72,8 +71,10 @@ class Attention(nn.Module):
         k = self.k_proj(x).view(batch_size, seq_len, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(batch_size, seq_len, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
-        # Apply RoPE
-        cos, sin = self.rotary_emb(x, seq_len)
+        # Apply RoPE with correct position offset
+        cos, sin = self.rotary_emb(x, start_pos + seq_len)
+        cos = cos[start_pos:start_pos + seq_len]
+        sin = sin[start_pos:start_pos + seq_len]
         q = apply_rotary_emb(q, cos[None, None, :, :], sin[None, None, :, :])
         k = apply_rotary_emb(k, cos[None, None, :, :], sin[None, None, :, :])
 
@@ -85,7 +86,7 @@ class Attention(nn.Module):
         # Attention
         attn = (q @ k.transpose(-2, -1)) * self.scale
         if mask is not None:
-            attn = attn.masked_fill(mask == 0, float('-inf'))
+            attn = attn + mask
         attn = F.softmax(attn, dim=-1)
 
         out = attn @ v
@@ -114,8 +115,8 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(dim)
         self.ffn_norm = RMSNorm(dim)
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x = x + self.attention(self.attention_norm(x), mask)
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, start_pos: int = 0) -> torch.Tensor:
+        x = x + self.attention(self.attention_norm(x), mask, start_pos)
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -190,27 +191,30 @@ class Llama3Customized:
 
         # Store reference to self as 'model' for compatibility
         self.model = self
+        print("✅ Model loaded successfully!")
         
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
         """
         Forward pass
         
         Args:
             tokens: Input token IDs [batch_size, seq_len]
+            start_pos: Starting position for RoPE (for KV cache)
             
         Returns:
             Logits [batch_size, seq_len, vocab_size]
         """
         batch_size, seq_len = tokens.shape
         
-        # Causal mask
-        mask = torch.tril(torch.ones(seq_len, seq_len, device=self.device))
-        mask = mask.view(1, 1, seq_len, seq_len)
+        # Create causal mask
+        mask = torch.full((seq_len, seq_len), float("-inf"), device=self.device, dtype=self.dtype)
+        mask = torch.triu(mask, diagonal=1)
+        mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
         
         # Forward
         x = self.embedding(tokens)
         for layer in self.layers:
-            x = layer(x, mask)
+            x = layer(x, mask, start_pos)
         x = self.norm(x)
         logits = self.output(x)
         
@@ -223,10 +227,12 @@ class Llama3Customized:
         prompt: str = None,
         attention_mask: Optional[torch.Tensor] = None,
         max_new_tokens: int = 100,
-        temperature: float = 1.0,
-        top_k: Optional[int] = None,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: Optional[int] = 50,
         do_sample: bool = True,
         pad_token_id: Optional[int] = None,
+        eos_token_id: Optional[int] = None,
         **kwargs
     ):
         """
@@ -238,10 +244,12 @@ class Llama3Customized:
             prompt: Input text (alternative to input_ids)
             attention_mask: Attention mask (for padding, currently ignored in custom implementation)
             max_new_tokens: Number of tokens to generate
-            temperature: Sampling temperature
+            temperature: Sampling temperature (higher = more random)
+            top_p: Nucleus sampling threshold
             top_k: Top-k sampling (optional)
             do_sample: Whether to sample (if False, uses greedy decoding)
             pad_token_id: Padding token ID
+            eos_token_id: End of sequence token ID
             **kwargs: Additional arguments (ignored)
 
         Returns:
@@ -259,23 +267,49 @@ class Llama3Customized:
         else:
             raise ValueError("Either input_ids or prompt must be provided")
 
-        batch_size = tokens.shape[0]
+        if eos_token_id is None:
+            eos_token_id = self.tokenizer.eos_token_id
 
-        # Generate tokens autoregressively using custom forward
+        batch_size = tokens.shape[0]
+        start_pos = 0
+
+        # Generate tokens autoregressively
         for _ in range(max_new_tokens):
-            # Get logits for last position
-            logits = self.forward(tokens)[:, -1, :]
+            # Only process the last token if we're past the initial prompt
+            if start_pos > 0:
+                # In a full KV cache implementation, we'd only forward the last token
+                # For now, we forward the full sequence
+                logits = self.forward(tokens, start_pos=0)[:, -1, :]
+            else:
+                logits = self.forward(tokens, start_pos=0)[:, -1, :]
+            
+            start_pos = tokens.shape[1]
 
             if do_sample and temperature > 0:
                 # Apply temperature
                 logits = logits / temperature
 
-                # Top-k sampling
-                if top_k is not None:
-                    v, _ = torch.topk(logits, top_k)
-                    logits[logits < v[:, [-1]]] = float('-inf')
+                # Top-k filtering
+                if top_k is not None and top_k > 0:
+                    indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+                    logits[indices_to_remove] = float('-inf')
 
-                # Sample
+                # Top-p (nucleus) filtering
+                if top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    
+                    # Remove tokens with cumulative probability above the threshold
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    # Keep at least one token
+                    sorted_indices_to_remove[..., 0] = False
+                    
+                    indices_to_remove = sorted_indices_to_remove.scatter(
+                        1, sorted_indices, sorted_indices_to_remove
+                    )
+                    logits[indices_to_remove] = float('-inf')
+
+                # Sample from the filtered distribution
                 probs = F.softmax(logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
             else:
@@ -284,6 +318,10 @@ class Llama3Customized:
 
             # Append to sequence
             tokens = torch.cat([tokens, next_token], dim=1)
+
+            # Check for EOS token
+            if eos_token_id is not None and (next_token == eos_token_id).all():
+                break
 
             # Check max length
             if tokens.shape[1] >= self.max_seq_len:
