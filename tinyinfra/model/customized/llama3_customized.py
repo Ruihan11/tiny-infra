@@ -47,14 +47,15 @@ def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> t
 
 
 class Attention(nn.Module):
-    """Multi-head attention with RoPE and Grouped Query Attention (GQA)"""
-    def __init__(self, dim: int, n_heads: int, n_kv_heads: int = None, max_seq_len: int = 2048):
+    """Multi-head attention with RoPE, Grouped Query Attention (GQA), KV cache, and FlashAttention"""
+    def __init__(self, dim: int, n_heads: int, n_kv_heads: int = None, max_seq_len: int = 2048, use_flash_attn: bool = True):
         super().__init__()
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads if n_kv_heads is not None else n_heads
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = dim // n_heads
         self.scale = self.head_dim ** -0.5
+        self.use_flash_attn = use_flash_attn
 
         self.q_proj = nn.Linear(dim, n_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
@@ -63,7 +64,17 @@ class Attention(nn.Module):
 
         self.rotary_emb = RotaryEmbedding(self.head_dim, max_seq_len)
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, start_pos: int = 0) -> torch.Tensor:
+        # KV cache buffers
+        self.cache_k = None
+        self.cache_v = None
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        start_pos: int = 0,
+        use_cache: bool = False
+    ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
 
         # Project to Q, K, V
@@ -78,20 +89,52 @@ class Attention(nn.Module):
         q = apply_rotary_emb(q, cos[None, None, :, :], sin[None, None, :, :])
         k = apply_rotary_emb(k, cos[None, None, :, :], sin[None, None, :, :])
 
+        # KV cache management
+        if use_cache:
+            if self.cache_k is None:
+                # Initialize cache
+                self.cache_k = k
+                self.cache_v = v
+            else:
+                # Append to cache
+                self.cache_k = torch.cat([self.cache_k, k], dim=2)
+                self.cache_v = torch.cat([self.cache_v, v], dim=2)
+
+            # Use cached K, V
+            k = self.cache_k
+            v = self.cache_v
+
         # Repeat K and V for GQA
         if self.n_rep > 1:
             k = k.repeat_interleave(self.n_rep, dim=1)
             v = v.repeat_interleave(self.n_rep, dim=1)
 
-        # Attention
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        if mask is not None:
-            attn = attn + mask
-        attn = F.softmax(attn, dim=-1)
+        # Attention (with optional FlashAttention)
+        if self.use_flash_attn and hasattr(F, 'scaled_dot_product_attention') and not use_cache:
+            # Use PyTorch's built-in FlashAttention (SDPA) for prefill only
+            # Note: SDPA expects (batch, n_heads, seq_len, head_dim)
+            # is_causal=True applies causal mask during attention
+            out = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=(mask is not None)
+            )
+        else:
+            # Standard attention (used during decode phase with cache or when FlashAttention disabled)
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            if mask is not None:
+                attn = attn + mask
+            attn = F.softmax(attn, dim=-1)
+            out = attn @ v
 
-        out = attn @ v
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         return self.o_proj(out)
+
+    def clear_cache(self):
+        """Clear KV cache"""
+        self.cache_k = None
+        self.cache_v = None
 
 
 class FeedForward(nn.Module):
@@ -108,15 +151,15 @@ class FeedForward(nn.Module):
 
 class TransformerBlock(nn.Module):
     """Transformer block with pre-normalization"""
-    def __init__(self, dim: int, n_heads: int, n_kv_heads: int, hidden_dim: int, max_seq_len: int = 2048):
+    def __init__(self, dim: int, n_heads: int, n_kv_heads: int, hidden_dim: int, max_seq_len: int = 2048, use_flash_attn: bool = True):
         super().__init__()
-        self.attention = Attention(dim, n_heads, n_kv_heads, max_seq_len)
+        self.attention = Attention(dim, n_heads, n_kv_heads, max_seq_len, use_flash_attn)
         self.feed_forward = FeedForward(dim, hidden_dim)
         self.attention_norm = RMSNorm(dim)
         self.ffn_norm = RMSNorm(dim)
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, start_pos: int = 0) -> torch.Tensor:
-        x = x + self.attention(self.attention_norm(x), mask, start_pos)
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, start_pos: int = 0, use_cache: bool = False) -> torch.Tensor:
+        x = x + self.attention(self.attention_norm(x), mask, start_pos, use_cache)
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
@@ -129,7 +172,8 @@ class Llama3Customized:
         model_name: str = "meta-llama/Meta-Llama-3-8B",
         device: str = "cuda",
         dtype: torch.dtype = torch.float16,
-        max_seq_len: int = 2048
+        max_seq_len: int = 2048,
+        use_flash_attn: bool = True
     ):
         """
         Initialize Llama3 model
@@ -139,11 +183,13 @@ class Llama3Customized:
             device: 'cuda' or 'cpu'
             dtype: torch.float16 or torch.float32
             max_seq_len: Maximum sequence length
+            use_flash_attn: Whether to use FlashAttention (SDPA)
         """
         self.model_name = model_name
         self.device = device
         self.dtype = dtype
         self.max_seq_len = max_seq_len
+        self.use_flash_attn = use_flash_attn
 
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -173,7 +219,7 @@ class Llama3Customized:
         # Build custom model components with correct dimensions
         self.embedding = nn.Embedding(vocab_size, dim).to(device).to(dtype)
         self.layers = nn.ModuleList([
-            TransformerBlock(dim, n_heads, n_kv_heads, hidden_dim, max_seq_len).to(device).to(dtype)
+            TransformerBlock(dim, n_heads, n_kv_heads, hidden_dim, max_seq_len, use_flash_attn).to(device).to(dtype)
             for _ in range(n_layers)
         ])
         self.norm = RMSNorm(dim).to(device).to(dtype)
@@ -191,34 +237,49 @@ class Llama3Customized:
 
         # Store reference to self as 'model' for compatibility
         self.model = self
-        print("✅ Model loaded successfully!")
-        
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
+
+        # Print FlashAttention status
+        flash_status = "✅ enabled" if self.use_flash_attn and hasattr(F, 'scaled_dot_product_attention') else "❌ disabled"
+        print(f"✅ Model loaded successfully! (FlashAttention: {flash_status})")
+
+    def forward(self, tokens: torch.Tensor, start_pos: int = 0, use_cache: bool = False) -> torch.Tensor:
         """
         Forward pass
-        
+
         Args:
             tokens: Input token IDs [batch_size, seq_len]
             start_pos: Starting position for RoPE (for KV cache)
-            
+            use_cache: Whether to use KV cache
+
         Returns:
             Logits [batch_size, seq_len, vocab_size]
         """
         batch_size, seq_len = tokens.shape
-        
+
         # Create causal mask
-        mask = torch.full((seq_len, seq_len), float("-inf"), device=self.device, dtype=self.dtype)
-        mask = torch.triu(mask, diagonal=1)
-        mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
-        
+        # Only needed when seq_len > 1 (prefill phase) or when not using cache
+        if seq_len > 1:
+            # Prefill: need causal mask
+            mask = torch.full((seq_len, seq_len), float("-inf"), device=self.device, dtype=self.dtype)
+            mask = torch.triu(mask, diagonal=1)
+            mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+        else:
+            # Decode: single token, no mask needed
+            mask = None
+
         # Forward
         x = self.embedding(tokens)
         for layer in self.layers:
-            x = layer(x, mask, start_pos)
+            x = layer(x, mask, start_pos, use_cache)
         x = self.norm(x)
         logits = self.output(x)
-        
+
         return logits
+
+    def clear_cache(self):
+        """Clear KV cache for all layers"""
+        for layer in self.layers:
+            layer.attention.clear_cache()
     
     @torch.no_grad()
     def generate(
@@ -233,6 +294,7 @@ class Llama3Customized:
         do_sample: bool = True,
         pad_token_id: Optional[int] = None,
         eos_token_id: Optional[int] = None,
+        use_cache: bool = True,
         **kwargs
     ):
         """
@@ -250,6 +312,7 @@ class Llama3Customized:
             do_sample: Whether to sample (if False, uses greedy decoding)
             pad_token_id: Padding token ID
             eos_token_id: End of sequence token ID
+            use_cache: Whether to use KV cache for faster generation
             **kwargs: Additional arguments (ignored)
 
         Returns:
@@ -271,19 +334,30 @@ class Llama3Customized:
             eos_token_id = self.tokenizer.eos_token_id
 
         batch_size = tokens.shape[0]
-        start_pos = 0
+
+        # Clear cache before generation
+        if use_cache:
+            self.clear_cache()
+
+        # Track current position for RoPE
+        cur_pos = 0
 
         # Generate tokens autoregressively
-        for _ in range(max_new_tokens):
-            # Only process the last token if we're past the initial prompt
-            if start_pos > 0:
-                # In a full KV cache implementation, we'd only forward the last token
-                # For now, we forward the full sequence
-                logits = self.forward(tokens, start_pos=0)[:, -1, :]
+        for i in range(max_new_tokens):
+            # With KV cache: process full sequence on first pass, then only last token
+            if use_cache:
+                if i == 0:
+                    # Prefill: process full sequence and initialize cache
+                    logits = self.forward(tokens, start_pos=0, use_cache=True)[:, -1, :]
+                    cur_pos = tokens.shape[1]
+                else:
+                    # Decode: only process the last token using cache
+                    current_tokens = tokens[:, -1:]
+                    logits = self.forward(current_tokens, start_pos=cur_pos, use_cache=True)[:, -1, :]
+                    cur_pos += 1
             else:
-                logits = self.forward(tokens, start_pos=0)[:, -1, :]
-            
-            start_pos = tokens.shape[1]
+                # No cache: process full sequence every time
+                logits = self.forward(tokens, start_pos=0, use_cache=False)[:, -1, :]
 
             if do_sample and temperature > 0:
                 # Apply temperature
@@ -298,12 +372,12 @@ class Llama3Customized:
                 if top_p < 1.0:
                     sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                     cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    
+
                     # Remove tokens with cumulative probability above the threshold
                     sorted_indices_to_remove = cumulative_probs > top_p
                     # Keep at least one token
                     sorted_indices_to_remove[..., 0] = False
-                    
+
                     indices_to_remove = sorted_indices_to_remove.scatter(
                         1, sorted_indices, sorted_indices_to_remove
                     )
@@ -326,6 +400,10 @@ class Llama3Customized:
             # Check max length
             if tokens.shape[1] >= self.max_seq_len:
                 break
+
+        # Clear cache after generation
+        if use_cache:
+            self.clear_cache()
 
         # Return based on input type
         if return_text:
