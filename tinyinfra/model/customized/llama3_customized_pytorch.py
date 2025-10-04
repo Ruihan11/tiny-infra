@@ -175,7 +175,7 @@ class Llama3Customized:
         max_seq_len: int = 2048,
         use_flash_attn: bool = True,
         use_compile: bool = True,
-        compile_mode: str = "default"
+        compile_mode: str = "max-autotune"
     ):
         """
         Initialize Llama3 model

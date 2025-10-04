@@ -65,39 +65,51 @@ class ThroughputBenchmark:
         # Benchmark
         print(f"\n⚡ Running benchmark ({num_runs} runs)...")
         times = []
+        times_no_profiling = []  # Track non-profiled runs separately
         total_tokens = 0
         profile_data = None
-        
+
         for i in range(num_runs):
             # Only profile first 3 runs to keep file size small
             should_profile = enable_profiler and i < 3
-            
+
             if should_profile:
                 run_time, prof = self._run_single_with_profiling(prompts, num_tokens, i)
                 if i == 2:  # Save profile after 3rd run
                     profile_data = self._save_profile(prof, profile_output_dir)
             else:
                 run_time = self._run_single(prompts, num_tokens)
-            
+                times_no_profiling.append(run_time)  # Only count non-profiled runs
+
             times.append(run_time)
             tokens_generated = num_tokens * batch_size
             total_tokens += tokens_generated
-            
+
             throughput = tokens_generated / run_time
             print(f"   Run {i+1}/{num_runs}: {throughput:.2f} tok/s")
-        
-        # Calculate results
-        total_time = sum(times)
-        mean_time = total_time / num_runs
-        tokens_per_run = num_tokens * batch_size
+
+        # Calculate results - use only non-profiled runs if profiling was enabled
+        if enable_profiler and times_no_profiling:
+            # Exclude profiled runs from throughput calculation
+            total_time = sum(times_no_profiling)
+            mean_time = total_time / len(times_no_profiling)
+            total_tokens_no_profiling = num_tokens * batch_size * len(times_no_profiling)
+            tokens_per_run = num_tokens * batch_size
+        else:
+            # No profiling - use all runs
+            total_time = sum(times)
+            mean_time = total_time / num_runs
+            total_tokens_no_profiling = total_tokens
+            tokens_per_run = num_tokens * batch_size
         
         results = {
-            "throughput_tokens_per_sec": total_tokens / total_time,
+            "throughput_tokens_per_sec": total_tokens_no_profiling / total_time,
             "mean_latency_sec": mean_time,
             "total_tokens": total_tokens,
             "total_time_sec": total_time,
             "tokens_per_run": tokens_per_run,
             "runs": num_runs,
+            "runs_used_for_throughput": len(times_no_profiling) if enable_profiler else num_runs,
             "batch_size": batch_size,
             "profiling_enabled": enable_profiler
         }

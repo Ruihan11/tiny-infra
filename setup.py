@@ -7,10 +7,14 @@ setup(
     install_requires=[
         "torch>=2.2.0",
         "transformers>=4.36.0",
+        "accelerate",
         "click>=8.1.0",
         "pyyaml>=6.0",
         "rich>=13.0.0",  # For beautiful CLI output
         "numpy>=1.24.0",
+        "torchvision",
+        "scipy",
+        "tabulate"
     ],
     entry_points={
         'console_scripts': [
