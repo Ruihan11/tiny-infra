@@ -10,10 +10,6 @@ uv pip install -e .
 
 hf auth login with your token
 
-```python
-python model.py
-```
-
 ```bash
 tinyinfra quantize awq --model meta-llama/Meta-Llama-3-8B --bits 4
 
@@ -42,10 +38,10 @@ tinyinfra benchmark throughput --model models/quantized/Meta-Llama-3-8B-bnb-int8
 tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --batch-size 8 --num-tokens 256 --num-runs 20 --wrapper hf
 tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --batch-size 8 --num-tokens 256 --num-runs 20 --wrapper customized
 ```
-| | llama3-8B hf| pytorch |
-|-|-|-|
-|Throughput(token/sec)  |284.08|427.19|
-|Mean Latency(ms)       |7209.24|4794.09|
+| | llama3-8B hf| pytorch | vllm |
+|-|-|-|-|
+|Throughput(token/sec)  |284.08|427.19|548.45|
+|Mean Latency(ms)       |7209.24|4794.09|3734.13|
 
 
 

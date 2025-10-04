@@ -219,7 +219,14 @@ class ThroughputBenchmark:
     
     def _generate_batch(self, prompts: List[str], num_tokens: int) -> List[str]:
         """Generate for a batch of prompts"""
-        if len(prompts) == 1:
+        # Check if model has native batch generation (e.g., vLLM)
+        if hasattr(self.model, 'generate_batch'):
+            return self.model.generate_batch(
+                prompts,
+                max_new_tokens=num_tokens,
+                temperature=1.0
+            )
+        elif len(prompts) == 1:
             output = self.model.generate(
                 prompts[0],
                 max_new_tokens=num_tokens,
@@ -227,6 +234,7 @@ class ThroughputBenchmark:
             )
             return [output]
         else:
+            # Use HuggingFace-style batch generation
             inputs = self.model.tokenizer(
                 prompts,
                 return_tensors="pt",
@@ -234,7 +242,7 @@ class ThroughputBenchmark:
                 truncation=True,
                 max_length=512
             ).to(self.model.device)
-            
+
             with torch.no_grad():
                 outputs = self.model.model.generate(
                     inputs.input_ids,
@@ -242,7 +250,7 @@ class ThroughputBenchmark:
                     max_new_tokens=num_tokens,
                     pad_token_id=self.model.tokenizer.pad_token_id
                 )
-            
+
             return self.model.tokenizer.batch_decode(outputs, skip_special_tokens=True)
     
     def print_results(self, results: Dict):

@@ -9,6 +9,7 @@ import torch
 
 from .model.hf.llama3_hf import Llama3HF
 from .model.customized.llama3_customized import Llama3Customized
+from .model.vllm.llama3_vllm import Llama3VLLM
 from .benchmark.throughput import ThroughputBenchmark
 from .benchmark.latency import LatencyBenchmark
 from .benchmark.accuracy import AccuracyBenchmark
@@ -32,7 +33,7 @@ def benchmark():
 
 @benchmark.command()
 @click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name or path')
-@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized']), help='Model wrapper to use')
+@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized', 'vllm']), help='Model wrapper to use')
 @click.option('--batch-size', default=1, type=int, help='Batch size')
 @click.option('--num-tokens', default=128, type=int, help='Number of tokens to generate')
 @click.option('--num-runs', default=10, type=int, help='Number of benchmark runs')
@@ -84,6 +85,7 @@ def throughput(model, wrapper, batch_size, num_tokens, num_runs, warmup, prompt,
     Wrappers:
         hf          - HuggingFace-based wrapper (default)
         customized  - Custom implementation wrapper (in development)
+        vllm        - vLLM high-performance inference engine
     """
     click.echo(f"\n{'='*60}")
     click.echo("🚀 THROUGHPUT BENCHMARK")
@@ -112,6 +114,8 @@ def throughput(model, wrapper, batch_size, num_tokens, num_runs, warmup, prompt,
             model_instance = Llama3HF(model_name=model, device=device)
         elif wrapper == 'customized':
             model_instance = Llama3Customized(model_name=model, device=device)
+        elif wrapper == 'vllm':
+            model_instance = Llama3VLLM(model_name=model, device=device)
         else:
             raise ValueError(f"Unknown wrapper: {wrapper}")
 
@@ -163,7 +167,7 @@ def throughput(model, wrapper, batch_size, num_tokens, num_runs, warmup, prompt,
 
 @benchmark.command()
 @click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name or path')
-@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized']), help='Model wrapper to use')
+@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized', 'vllm']), help='Model wrapper to use')
 @click.option('--num-tokens', default=128, type=int, help='Number of tokens to generate')
 @click.option('--num-runs', default=100, type=int, help='Number of benchmark runs')
 @click.option('--warmup', default=5, type=int, help='Number of warmup runs')
@@ -208,6 +212,7 @@ def latency(model, wrapper, num_tokens, num_runs, warmup, prompt, output, profil
     Wrappers:
         hf          - HuggingFace-based wrapper (default)
         customized  - Custom implementation wrapper (in development)
+        vllm        - vLLM high-performance inference engine
     """
     click.echo(f"\n{'='*60}")
     click.echo("⚡ LATENCY BENCHMARK")
@@ -234,6 +239,8 @@ def latency(model, wrapper, num_tokens, num_runs, warmup, prompt, output, profil
             model_instance = Llama3HF(model_name=model, device=device)
         elif wrapper == 'customized':
             model_instance = Llama3Customized(model_name=model, device=device)
+        elif wrapper == 'vllm':
+            model_instance = Llama3VLLM(model_name=model, device=device)
         else:
             raise ValueError(f"Unknown wrapper: {wrapper}")
 
@@ -282,7 +289,7 @@ def latency(model, wrapper, num_tokens, num_runs, warmup, prompt, output, profil
 
 @benchmark.command()
 @click.option('--model', required=True, help='Model name or path')
-@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized']), help='Model wrapper to use')
+@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized', 'vllm']), help='Model wrapper to use')
 @click.option('--split', default='validation', type=click.Choice(['validation', 'test']), help='Dataset split')
 @click.option('--num-samples', default=None, type=int, help='Number of samples (None = all)')
 @click.option('--subjects', default=None, help='Comma-separated subjects (None = all)')
@@ -328,6 +335,7 @@ def accuracy(model, wrapper, split, num_samples, subjects, output, device):
     Wrappers:
         hf          - HuggingFace-based wrapper (default)
         customized  - Custom implementation wrapper (in development)
+        vllm        - vLLM high-performance inference engine
     """
     click.echo(f"\n{'='*60}")
     click.echo("📊 MMLU ACCURACY BENCHMARK")
@@ -361,6 +369,8 @@ def accuracy(model, wrapper, split, num_samples, subjects, output, device):
             model_instance = Llama3HF(model_name=model, device=device)
         elif wrapper == 'customized':
             model_instance = Llama3Customized(model_name=model, device=device)
+        elif wrapper == 'vllm':
+            model_instance = Llama3VLLM(model_name=model, device=device)
         else:
             raise ValueError(f"Unknown wrapper: {wrapper}")
 
@@ -426,7 +436,7 @@ def accuracy(model, wrapper, split, num_samples, subjects, output, device):
 
 @benchmark.command()
 @click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name or path')
-@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized']), help='Model wrapper to use')
+@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized', 'vllm']), help='Model wrapper to use')
 @click.option('--output', default='results/baseline', help='Output directory')
 def all(model, wrapper, output):
     """
@@ -447,6 +457,7 @@ def all(model, wrapper, output):
     Wrappers:
         hf          - HuggingFace-based wrapper (default)
         customized  - Custom implementation wrapper (in development)
+        vllm        - vLLM high-performance inference engine
     """
     click.echo(f"\n{'='*60}")
     click.echo("🎯 FULL BENCHMARK")
@@ -458,6 +469,8 @@ def all(model, wrapper, output):
             model_instance = Llama3HF(model_name=model)
         elif wrapper == 'customized':
             model_instance = Llama3Customized(model_name=model)
+        elif wrapper == 'vllm':
+            model_instance = Llama3VLLM(model_name=model)
         else:
             raise ValueError(f"Unknown wrapper: {wrapper}")
         
