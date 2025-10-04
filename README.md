@@ -5,7 +5,7 @@ git clone git@github.com:Ruihan11/tiny-infra.git
 cd tiny-infra
 uv venv --python 3.12 --seed
 source .venv/bin/activate
-uv pip install -r requirements.txt 
+uv pip install -e .
 ```
 
 hf auth login with your token
