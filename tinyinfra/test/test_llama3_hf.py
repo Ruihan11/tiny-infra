@@ -10,7 +10,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from tinyinfra.model.hf.llama3_hf import Llama3HF
+from tinyinfra.model.llama3_hf import Llama3HF
 
 
 class TestLlama3HF:
@@ -50,6 +50,18 @@ class TestLlama3HF:
         assert isinstance(output, str)
         assert prompt in output
         assert len(output) > len(prompt)
+
+    def test_explain_ai(self, model):
+        """Test inference with 'explain ai' prompt"""
+        prompt = "explain ai"
+        output = model.generate(prompt, max_new_tokens=100)
+
+        print(f"\nPrompt: {prompt}")
+        print(f"Output: {output}")
+
+        assert isinstance(output, str)
+        assert len(output) > len(prompt)
+        assert prompt in output.lower()
 
     def test_longer_generation(self, model):
         """Test longer generation"""

@@ -10,7 +10,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from tinyinfra.model.customized.llama3_customized import Llama3Customized
+from tinyinfra.model.llama3_py import Llama3Customized
 
 
 class TestLlama3Customized:
@@ -54,6 +54,18 @@ class TestLlama3Customized:
         assert isinstance(output, str)
         assert prompt in output
         assert len(output) > len(prompt)
+
+    def test_explain_ai(self, model):
+        """Test inference with 'explain ai' prompt"""
+        prompt = "explain ai"
+        output = model.generate(prompt=prompt, max_new_tokens=100)
+
+        print(f"\nPrompt: {prompt}")
+        print(f"Output: {output}")
+
+        assert isinstance(output, str)
+        assert len(output) > len(prompt)
+        assert prompt in output.lower()
 
     def test_generation_with_input_ids(self, model):
         """Test generation with input_ids instead of prompt"""

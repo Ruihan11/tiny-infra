@@ -31,13 +31,19 @@ hf download meta-llama/Meta-Llama-3-8B --local-dir meta-llama/Meta-Llama-3-8B
 Benchmark HuggingFace Transformers implementation:
 
 ```bash
-tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper hf
+tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper llama3_hf
 ```
 
-Benchmark custom PyTorch implementation:
+Benchmark naive PyTorch implementation (clean, no optimizations):
 
 ```bash
-tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper customized
+tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper llama3_naive
+```
+
+Benchmark custom optimized PyTorch implementation:
+
+```bash
+tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper llama3_customized_pytorch
 ```
 
 Customize benchmark parameters:
@@ -45,7 +51,7 @@ Customize benchmark parameters:
 ```bash
 tinyinfra benchmark throughput \
     --model meta-llama/Meta-Llama-3-8B \
-    --wrapper hf \
+    --wrapper llama3_hf \
     --batch-size 8 \
     --num-tokens 256 \
     --num-runs 20 \
@@ -71,9 +77,10 @@ Example results on A100 GPU:
 
 ## Features
 
-- **Two inference implementations:**
-  - HuggingFace Transformers wrapper
-  - Custom PyTorch implementation with KV cache and FlashAttention
+- **Three inference implementations:**
+  - HuggingFace Transformers wrapper (`llama3_hf`)
+  - Naive PyTorch implementation - clean, unoptimized code (`llama3_naive`)
+  - Custom PyTorch implementation with KV cache and FlashAttention (`llama3_customized_pytorch`)
 
 - **Throughput benchmarking:**
   - Configurable batch size, token count, and runs

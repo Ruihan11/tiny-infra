@@ -7,9 +7,11 @@ import json
 from pathlib import Path
 import torch
 
-from .model.hf.llama3_hf import Llama3HF
-from .model.customized.llama3_customized import Llama3Customized
+from .model import get_wrapper_registry
 from .benchmark.throughput import ThroughputBenchmark
+
+# Auto-discover wrappers from model/ directory
+WRAPPERS = get_wrapper_registry()
 
 
 @click.group()
@@ -30,7 +32,7 @@ def benchmark():
 
 @benchmark.command()
 @click.option('--model', default='meta-llama/Meta-Llama-3-8B', help='Model name or path')
-@click.option('--wrapper', default='hf', type=click.Choice(['hf', 'customized']), help='Model wrapper to use')
+@click.option('--wrapper', default='llama3_hf', type=click.Choice(list(WRAPPERS.keys())), help='Model wrapper to use')
 @click.option('--batch-size', default=1, type=int, help='Batch size')
 @click.option('--num-tokens', default=128, type=int, help='Number of tokens to generate')
 @click.option('--num-runs', default=10, type=int, help='Number of benchmark runs')
@@ -49,7 +51,7 @@ def throughput(model, wrapper, batch_size, num_tokens, num_runs, warmup, prompt,
         tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B
 
         # Use customized PyTorch wrapper
-        tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper customized
+        tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper llama3_customized_pytorch
 
         # Batch processing
         tinyinfra benchmark throughput \\
@@ -77,8 +79,9 @@ def throughput(model, wrapper, batch_size, num_tokens, num_runs, warmup, prompt,
 
     \b
     Wrappers:
-        hf          - HuggingFace Transformers wrapper
-        customized  - Custom PyTorch implementation
+        llama3_hf                  - HuggingFace Transformers wrapper
+        llama3_naive               - Naive PyTorch (clean, no optimizations)
+        llama3_customized_pytorch  - Optimized PyTorch (KV cache, FlashAttention)
     """
     click.echo(f"\n{'='*60}")
     click.echo("THROUGHPUT BENCHMARK")
@@ -102,13 +105,11 @@ def throughput(model, wrapper, batch_size, num_tokens, num_runs, warmup, prompt,
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        # Select wrapper
-        if wrapper == 'hf':
-            model_instance = Llama3HF(model_name=model, device=device)
-        elif wrapper == 'customized':
-            model_instance = Llama3Customized(model_name=model, device=device)
-        else:
+        # Load wrapper from registry
+        wrapper_class = WRAPPERS.get(wrapper)
+        if not wrapper_class:
             raise ValueError(f"Unknown wrapper: {wrapper}")
+        model_instance = wrapper_class(model_name=model, device=device)
 
         click.echo(f"Loaded: {model_instance.get_model_size():.1f}GB")
         if device == 'cuda':
