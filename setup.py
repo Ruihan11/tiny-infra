@@ -9,13 +9,9 @@ setup(
         "transformers",
         "accelerate",
         "click",
-        "pyyaml",
-        "rich",  # For beautiful CLI output
         "numpy",
-        "torchvision",
         "scipy",
         "tabulate",
-        "vllm",
         "setuptools"
     ],
     entry_points={

@@ -1,5 +1,9 @@
 # tiny-infra
 
+Minimal LLM inference toolkit with HuggingFace and PyTorch implementations, focused on throughput benchmarking.
+
+## Installation
+
 ```bash
 git clone git@github.com:Ruihan11/tiny-infra.git
 cd tiny-infra
@@ -8,42 +12,72 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
-hf auth login with your token
+## Authentication
+
+Login to HuggingFace with your token:
 
 ```bash
-tinyinfra quantize awq --model meta-llama/Meta-Llama-3-8B --bits 4
-
-tinyinfra quantize bnb --model meta-llama/Meta-Llama-3-8B --bits 4
-
-tinyinfra quantize bnb --model meta-llama/Meta-Llama-3-8B --bits 8
-
-tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --batch-size 8 --num-tokens 256 --num-runs 20 
-
-tinyinfra benchmark throughput --model models/quantized/Meta-Llama-3-8B-awq-int4 --batch-size 8 --num-tokens 256 --num-runs 20 
-
-tinyinfra benchmark throughput --model models/quantized/Meta-Llama-3-8B-bnb-int4 --batch-size 8 --num-tokens 256 --num-runs 20 
-
-tinyinfra benchmark throughput --model models/quantized/Meta-Llama-3-8B-bnb-int8 --batch-size 8 --num-tokens 256 --num-runs 20 
+huggingface-cli login
 ```
-> some quick test on A100
 
-| | llama3-8B | awq-int4 | bnb-int4 | bnb-int8 |
-|-|-|-|-|-|
-|Memory (GB)            |15.0|5.3|5.3|8.5|
-|Throughput(token/sec)  |229.91|152.68|112.59|66.09|
-|Mean Latency(ms)       |8907.83|13413.59|18190.15|30988.62|
+## Usage
 
+### Throughput Benchmarking
+
+Benchmark HuggingFace Transformers implementation:
 
 ```bash
-tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --batch-size 8 --num-tokens 256 --num-runs 20 --wrapper hf
-tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --batch-size 8 --num-tokens 256 --num-runs 20 --wrapper customized
+tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper hf
 ```
-| | llama3-8B hf| pytorch | vllm |
-|-|-|-|-|
-|Throughput(token/sec)  |284.08|427.19|548.45|
-|Mean Latency(ms)       |7209.24|4794.09|3734.13|
 
+Benchmark custom PyTorch implementation:
 
+```bash
+tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper customized
+```
 
+Customize benchmark parameters:
 
+```bash
+tinyinfra benchmark throughput \
+    --model meta-llama/Meta-Llama-3-8B \
+    --wrapper hf \
+    --batch-size 8 \
+    --num-tokens 256 \
+    --num-runs 20 \
+    --output results/my_benchmark
+```
 
+### System Information
+
+Check CUDA availability and system info:
+
+```bash
+tinyinfra info
+```
+
+## Benchmark Results
+
+Example results on A100 GPU:
+
+| Wrapper | Throughput (tokens/sec) | Mean Latency (ms) |
+|---------|------------------------|-------------------|
+| HuggingFace | 284.08 | 7209.24 |
+| PyTorch Custom | 427.19 | 4794.09 |
+
+## Features
+
+- **Two inference implementations:**
+  - HuggingFace Transformers wrapper
+  - Custom PyTorch implementation with KV cache and FlashAttention
+
+- **Throughput benchmarking:**
+  - Configurable batch size, token count, and runs
+  - Warmup runs for stable measurements
+  - PyTorch profiler support
+  - JSON output with detailed metrics
+
+- **CLI interface:**
+  - Simple command-line interface
+  - System info checking
+  - Multiple device support (CUDA/CPU/auto)
