@@ -20,6 +20,10 @@ Login to HuggingFace with your token:
 huggingface-cli login
 ```
 
+```bash
+hf download meta-llama/Meta-Llama-3-8B --local-dir meta-llama/Meta-Llama-3-8B
+```
+
 ## Usage
 
 ### Throughput Benchmarking
