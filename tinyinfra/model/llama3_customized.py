@@ -91,18 +91,20 @@ class Attention(nn.Module):
 
         # KV cache management
         if use_cache:
+            # Initialize cache if needed
             if self.cache_k is None:
-                # Initialize cache
-                self.cache_k = k
-                self.cache_v = v
-            else:
-                # Append to cache
-                self.cache_k = torch.cat([self.cache_k, k], dim=2)
-                self.cache_v = torch.cat([self.cache_v, v], dim=2)
+                # Pre-allocate full cache based on max_seq_len to avoid memory fragmentation
+                cache_shape = (batch_size, self.n_kv_heads, self.rotary_emb.max_seq_len, self.head_dim)
+                self.cache_k = torch.zeros(cache_shape, dtype=k.dtype, device=k.device)
+                self.cache_v = torch.zeros(cache_shape, dtype=v.dtype, device=v.device)
 
-            # Use cached K, V
-            k = self.cache_k
-            v = self.cache_v
+            # Update cache with new values
+            self.cache_k[:, :, start_pos:start_pos + seq_len, :] = k
+            self.cache_v[:, :, start_pos:start_pos + seq_len, :] = v
+
+            # Use cached K, V up to current position
+            k = self.cache_k[:, :, :start_pos + seq_len, :]
+            v = self.cache_v[:, :, :start_pos + seq_len, :]
 
         # Repeat K and V for GQA
         if self.n_rep > 1:
@@ -132,9 +134,13 @@ class Attention(nn.Module):
         return self.o_proj(out)
 
     def clear_cache(self):
-        """Clear KV cache"""
-        self.cache_k = None
-        self.cache_v = None
+        """Clear KV cache to free memory"""
+        if self.cache_k is not None:
+            del self.cache_k
+            self.cache_k = None
+        if self.cache_v is not None:
+            del self.cache_v
+            self.cache_v = None
 
 
 class FeedForward(nn.Module):
@@ -202,17 +208,9 @@ class Llama3Customized:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Load pretrained model to get config
-        print(f"⏳ Loading pretrained weights from {model_name}...")
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            dtype=dtype,
-            device_map="auto",
-            low_cpu_mem_usage=True
-        )
-
-        # Get model config from HuggingFace model
-        config = hf_model.config
+        # Load config only first to get model dimensions
+        print(f"⏳ Loading model config from {model_name}...")
+        config = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype).config
         vocab_size = config.vocab_size
         dim = config.hidden_size
         n_layers = config.num_hidden_layers
@@ -236,10 +234,9 @@ class Llama3Customized:
 
         self.model_components = [self.embedding, *self.layers, self.norm, self.output]
 
-        # Load weights from HuggingFace model
-        self._load_from_hf_model(hf_model)
-        del hf_model  # Free memory
-        torch.cuda.empty_cache()
+        # Load weights directly from HuggingFace model without keeping full model in memory
+        print(f"⏳ Loading weights from {model_name}...")
+        self._load_weights_directly(model_name, dtype)
 
         # Apply PyTorch optimizations
         self._apply_optimizations()
@@ -260,10 +257,24 @@ class Llama3Customized:
         # Store reference to self as 'model' for compatibility
         self.model = self
 
+        # Initialize gradient checkpointing flag
+        self.gradient_checkpointing = False
+
         # Print optimization status
         flash_status = "✅ enabled" if self.use_flash_attn and hasattr(F, 'scaled_dot_product_attention') else "❌ disabled"
         compile_status = f"✅ enabled ({self.compile_mode})" if self.use_compile else "❌ disabled"
         print(f"✅ Model loaded successfully! (FlashAttention: {flash_status}, torch.compile: {compile_status})")
+
+    def enable_gradient_checkpointing(self):
+        """Enable gradient checkpointing to reduce memory usage during training"""
+        import torch.utils.checkpoint as checkpoint
+        self.gradient_checkpointing = True
+        print("✅ Gradient checkpointing enabled")
+
+    def disable_gradient_checkpointing(self):
+        """Disable gradient checkpointing"""
+        self.gradient_checkpointing = False
+        print("✅ Gradient checkpointing disabled")
 
     def forward(self, tokens: torch.Tensor, start_pos: int = 0, use_cache: bool = False) -> torch.Tensor:
         """
@@ -292,12 +303,25 @@ class Llama3Customized:
 
         # Forward
         x = self.embedding(tokens)
+
+        # Process each layer with optional gradient checkpointing
         for layer in self.layers:
-            x = layer(x, mask, start_pos, use_cache)
+            if self.gradient_checkpointing and self.training:
+                # Use gradient checkpointing to reduce memory usage during training
+                x = torch.utils.checkpoint.checkpoint(
+                    self._layer_forward, layer, x, mask, start_pos, use_cache, use_reentrant=False
+                )
+            else:
+                x = layer(x, mask, start_pos, use_cache)
+
         x = self.norm(x)
         logits = self.output(x)
 
         return logits
+
+    def _layer_forward(self, layer, x, mask, start_pos, use_cache):
+        """Helper function for gradient checkpointing"""
+        return layer(x, mask, start_pos, use_cache)
 
     def clear_cache(self):
         """Clear KV cache for all layers"""
@@ -321,17 +345,18 @@ class Llama3Customized:
     @torch.no_grad()
     def generate(
         self,
-        input_ids: torch.Tensor = None,
+        input_ids=None,  # Change to be compatible with both tensor and string
         prompt: str = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask=None,
         max_new_tokens: int = 100,
         temperature: float = 0.7,
         top_p: float = 0.9,
         top_k: Optional[int] = 50,
         do_sample: bool = True,
-        pad_token_id: Optional[int] = None,
-        eos_token_id: Optional[int] = None,
+        pad_token_id=None,
+        eos_token_id=None,
         use_cache: bool = True,
+        max_memory_gb: Optional[float] = None,  # New parameter: maximum memory usage in GB
         **kwargs
     ):
         """
@@ -350,12 +375,20 @@ class Llama3Customized:
             pad_token_id: Padding token ID
             eos_token_id: End of sequence token ID
             use_cache: Whether to use KV cache for faster generation
+            max_memory_gb: Maximum allowed GPU memory usage in GB (stops generation if exceeded)
             **kwargs: Additional arguments (ignored)
 
         Returns:
             If input_ids provided: Generated token IDs [batch_size, seq_len + max_new_tokens]
             If prompt provided: Generated text string
         """
+        # Handle input - check if input_ids is actually a string (first positional arg is prompt)
+        if input_ids is not None:
+            # Check if input_ids is a string, which means it's actually the prompt
+            if isinstance(input_ids, str):
+                prompt = input_ids
+                input_ids = None
+
         # Handle input
         if input_ids is not None:
             tokens = input_ids.to(self.device)
@@ -381,6 +414,13 @@ class Llama3Customized:
 
         # Generate tokens autoregressively
         for i in range(max_new_tokens):
+            # Check memory usage and exit early if needed
+            if max_memory_gb is not None and self.device == "cuda":
+                current_memory_gb = torch.cuda.memory_allocated() / (1024 ** 3)
+                if current_memory_gb > max_memory_gb:
+                    print(f"⚠️ Memory limit exceeded ({current_memory_gb:.2f}GB > {max_memory_gb}GB). Stopping generation.")
+                    break
+
             # Use compiled forward if available
             forward_fn = self.forward_compiled if self.forward_compiled is not None else self.forward
 
@@ -451,6 +491,94 @@ class Llama3Customized:
         else:
             return tokens
     
+    def _load_weights_directly(self, model_name: str, dtype: torch.dtype):
+        """Load weights directly from HuggingFace model without keeping full model in memory"""
+        import transformers
+        from transformers.utils import cached_file, SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
+        from transformers.modeling_utils import load_state_dict
+        import os
+        import json
+        try:
+            from safetensors.torch import load_file
+        except ImportError:
+            # If safetensors is not available, fall back to pytorch format
+            model_path = cached_file(model_name, transformers.modeling_utils.WEIGHTS_NAME)
+            state_dict = load_state_dict(model_path)
+            load_file = None
+
+        # First try to find safetensors files if the module is available
+        state_dict = None
+        if load_file is not None:
+            try:
+                # Try loading the index file first (sharded safetensors)
+                index_file = cached_file(model_name, SAFE_WEIGHTS_INDEX_NAME)
+                with open(index_file, 'r') as f:
+                    index = json.load(f)
+
+                # Load all safetensors files
+                state_dict = {}
+                for safetensors_file in set(index['weight_map'].values()):
+                    safetensors_path = cached_file(model_name, safetensors_file)
+                    partial_state_dict = load_file(safetensors_path)
+                    state_dict.update(partial_state_dict)
+
+            except:  # If index file doesn't exist or fails, try single safetensors file
+                try:
+                    model_path = cached_file(model_name, SAFE_WEIGHTS_NAME)
+                    state_dict = load_file(model_path)
+                except:
+                    # Fall back to pytorch format
+                    model_path = cached_file(model_name, transformers.modeling_utils.WEIGHTS_NAME)
+                    state_dict = load_state_dict(model_path)
+        else:
+            # safetensors not available, use pytorch format
+            model_path = cached_file(model_name, transformers.modeling_utils.WEIGHTS_NAME)
+            state_dict = load_state_dict(model_path)
+
+        # Load embedding weights
+        if 'model.embed_tokens.weight' in state_dict:
+            self.embedding.weight.data.copy_(state_dict['model.embed_tokens.weight'].to(self.device).to(dtype))
+
+        # Load layer weights
+        for i, layer in enumerate(self.layers):
+            prefix = f'model.layers.{i}.'
+
+            # Attention weights
+            if f'{prefix}self_attn.q_proj.weight' in state_dict:
+                layer.attention.q_proj.weight.data.copy_(state_dict[f'{prefix}self_attn.q_proj.weight'].to(self.device).to(dtype))
+            if f'{prefix}self_attn.k_proj.weight' in state_dict:
+                layer.attention.k_proj.weight.data.copy_(state_dict[f'{prefix}self_attn.k_proj.weight'].to(self.device).to(dtype))
+            if f'{prefix}self_attn.v_proj.weight' in state_dict:
+                layer.attention.v_proj.weight.data.copy_(state_dict[f'{prefix}self_attn.v_proj.weight'].to(self.device).to(dtype))
+            if f'{prefix}self_attn.o_proj.weight' in state_dict:
+                layer.attention.o_proj.weight.data.copy_(state_dict[f'{prefix}self_attn.o_proj.weight'].to(self.device).to(dtype))
+
+            # Feed-forward weights
+            if f'{prefix}mlp.gate_proj.weight' in state_dict:
+                layer.feed_forward.gate_proj.weight.data.copy_(state_dict[f'{prefix}mlp.gate_proj.weight'].to(self.device).to(dtype))
+            if f'{prefix}mlp.up_proj.weight' in state_dict:
+                layer.feed_forward.up_proj.weight.data.copy_(state_dict[f'{prefix}mlp.up_proj.weight'].to(self.device).to(dtype))
+            if f'{prefix}mlp.down_proj.weight' in state_dict:
+                layer.feed_forward.down_proj.weight.data.copy_(state_dict[f'{prefix}mlp.down_proj.weight'].to(self.device).to(dtype))
+
+            # Layer norms
+            if f'{prefix}input_layernorm.weight' in state_dict:
+                layer.attention_norm.weight.data.copy_(state_dict[f'{prefix}input_layernorm.weight'].to(self.device).to(dtype))
+            if f'{prefix}post_attention_layernorm.weight' in state_dict:
+                layer.ffn_norm.weight.data.copy_(state_dict[f'{prefix}post_attention_layernorm.weight'].to(self.device).to(dtype))
+
+        # Load final norm
+        if 'model.norm.weight' in state_dict:
+            self.norm.weight.data.copy_(state_dict['model.norm.weight'].to(self.device).to(dtype))
+
+        # Load output projection (lm_head)
+        if 'lm_head.weight' in state_dict:
+            self.output.weight.data.copy_(state_dict['lm_head.weight'].to(self.device).to(dtype))
+
+        # Clean up the loaded state dict to free memory
+        del state_dict
+        torch.cuda.empty_cache()
+
     def _load_from_hf_model(self, hf_model):
         """Load weights from HuggingFace model to custom architecture"""
         hf_state = hf_model.state_dict()

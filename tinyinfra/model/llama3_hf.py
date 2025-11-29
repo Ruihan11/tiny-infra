@@ -63,6 +63,7 @@ class Llama3HF:
 
         outputs = self.model.generate(
             inputs.input_ids,
+            attention_mask=inputs.attention_mask,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             do_sample=temperature > 0,

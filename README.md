@@ -7,6 +7,7 @@ Minimal LLM inference toolkit with HuggingFace and PyTorch implementations, focu
 ```bash
 git clone git@github.com:Ruihan11/tiny-infra.git
 cd tiny-infra
+pip install uv
 uv venv --python 3.12 --seed
 source .venv/bin/activate
 uv pip install -e .
@@ -43,7 +44,7 @@ tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper llam
 Benchmark custom optimized PyTorch implementation:
 
 ```bash
-tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper llama3_customized_pytorch
+tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper llama3_customized
 ```
 
 Customize benchmark parameters:
@@ -51,7 +52,7 @@ Customize benchmark parameters:
 ```bash
 tinyinfra benchmark throughput \
     --model meta-llama/Meta-Llama-3-8B \
-    --wrapper llama3_hf \
+    --wrapper llama3_customized \
     --batch-size 8 \
     --num-tokens 256 \
     --num-runs 20 \
