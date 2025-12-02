@@ -29,30 +29,10 @@ hf download meta-llama/Meta-Llama-3-8B --local-dir meta-llama/Meta-Llama-3-8B
 
 ### Throughput Benchmarking
 
-Benchmark HuggingFace Transformers implementation:
-
-```bash
-tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper llama3_hf
-```
-
-Benchmark naive PyTorch implementation (clean, no optimizations):
-
-```bash
-tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper llama3_naive
-```
-
-Benchmark custom optimized PyTorch implementation:
-
-```bash
-tinyinfra benchmark throughput --model meta-llama/Meta-Llama-3-8B --wrapper llama3_customized
-```
-
-Customize benchmark parameters:
-
 ```bash
 tinyinfra benchmark throughput \
     --model meta-llama/Meta-Llama-3-8B \
-    --wrapper llama3_customized \
+    --wrapper llama3_02_opt \
     --batch-size 8 \
     --num-tokens 256 \
     --num-runs 20 \
@@ -69,27 +49,26 @@ tinyinfra info
 
 ## Benchmark Results
 
-Example results on A100 GPU:
+Example results on RTX5090 GPU:
+
+```bash
+tinyinfra benchmark throughput \
+    --model meta-llama/Meta-Llama-3-8B \
+    --wrapper llama3_02_opt \
+    --batch-size 8 \
+    --num-tokens 256 \
+    --num-runs 10
+```
 
 | Wrapper | Throughput (tokens/sec) | Mean Latency (ms) |
 |---------|------------------------|-------------------|
-| HuggingFace | 284.08 | 7209.24 |
-| PyTorch Custom | 427.19 | 4794.09 |
+| HuggingFace | 508.19 | 4029.96 |
+| Naive | 509.82 | 4017.13 |
+| Py-optimized | 641.36  | 3193.20 |
 
-## Features
-
-- **Three inference implementations:**
-  - HuggingFace Transformers wrapper (`llama3_hf`)
-  - Naive PyTorch implementation - clean, unoptimized code (`llama3_naive`)
-  - Custom PyTorch implementation with KV cache and FlashAttention (`llama3_customized_pytorch`)
-
-- **Throughput benchmarking:**
-  - Configurable batch size, token count, and runs
-  - Warmup runs for stable measurements
-  - PyTorch profiler support
-  - JSON output with detailed metrics
-
-- **CLI interface:**
-  - Simple command-line interface
-  - System info checking
-  - Multiple device support (CUDA/CPU/auto)
+nsys profile -o profiling tinyinfra benchmark throughput \
+    --model meta-llama/Meta-Llama-3-8B \
+    --wrapper llama3_02_opt \
+    --batch-size 8 \
+    --num-tokens 256 \
+    --num-runs 10

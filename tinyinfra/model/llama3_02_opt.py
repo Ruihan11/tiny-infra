@@ -210,7 +210,7 @@ class Llama3Customized:
 
         # Load config only first to get model dimensions
         print(f"⏳ Loading model config from {model_name}...")
-        config = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype).config
+        config = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype).config
         vocab_size = config.vocab_size
         dim = config.hidden_size
         n_layers = config.num_hidden_layers
