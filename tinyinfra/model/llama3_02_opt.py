@@ -83,6 +83,7 @@ class Attention(nn.Module):
         v = self.v_proj(x).view(batch_size, seq_len, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
         # Apply RoPE with correct position offset
+        # For RoPE, we need to consider the full sequence length including cached tokens
         cos, sin = self.rotary_emb(x, start_pos + seq_len)
         cos = cos[start_pos:start_pos + seq_len]
         sin = sin[start_pos:start_pos + seq_len]
@@ -445,23 +446,30 @@ class Llama3Customized:
 
                 # Top-k filtering
                 if top_k is not None and top_k > 0:
-                    indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-                    logits[indices_to_remove] = float('-inf')
+                    # Get the values of the top-k logits
+                    top_k_logits, _ = torch.topk(logits, min(top_k, logits.size(-1)), dim=-1)
+                    # Create a mask to identify logits that are below the top-k threshold
+                    indices_to_remove = logits < top_k_logits[..., -1, None]
+                    logits = logits.masked_fill(indices_to_remove, float('-inf'))
 
                 # Top-p (nucleus) filtering
-                if top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                if top_p < 1.0 and top_p > 0.0:
+                    # Apply softmax to get probabilities
+                    probs = F.softmax(logits, dim=-1)
+                    # Sort probabilities in descending order
+                    sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+
+                    # Calculate cumulative probabilities
+                    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
 
                     # Remove tokens with cumulative probability above the threshold
                     sorted_indices_to_remove = cumulative_probs > top_p
-                    # Keep at least one token
+                    # Keep at least one token (the most probable one) to avoid all-logits-being-masked error
                     sorted_indices_to_remove[..., 0] = False
 
-                    indices_to_remove = sorted_indices_to_remove.scatter(
-                        1, sorted_indices, sorted_indices_to_remove
-                    )
-                    logits[indices_to_remove] = float('-inf')
+                    # Create a mask for the original logits tensor
+                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                    logits = logits.masked_fill(indices_to_remove, float('-inf'))
 
                 # Sample from the filtered distribution
                 probs = F.softmax(logits, dim=-1)

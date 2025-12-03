@@ -10,7 +10,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from tinyinfra.model.llama3_naive import Llama3Naive
+from tinyinfra.model.llama3_01_naive import Llama3Naive
 
 
 class TestLlama3Naive:
@@ -136,8 +136,8 @@ if __name__ == "__main__":
     print(f"   Size: {model.get_model_size():.2f} GB")
     print(f"   Memory: {model.get_memory_usage():.2f} GB")
 
-    prompt = "explain ai"
-    output = model.generate(prompt, max_new_tokens=50)
+    prompt = "AI is"
+    output = model.generate(prompt, max_new_tokens=200)
 
     print(f"\n✅ Generation test")
     print(f"   Prompt: {prompt}")
