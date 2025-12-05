@@ -69,6 +69,8 @@ class ThroughputBenchmark:
         total_tokens = 0
         profile_data = None
 
+        # Initialize profile_data_to_save to None to ensure it exists
+        profile_data_to_save = None
         for i in range(num_runs):
             # Only profile first 3 runs to keep file size small
             should_profile = enable_profiler and i < 3
@@ -76,7 +78,8 @@ class ThroughputBenchmark:
             if should_profile:
                 run_time, prof = self._run_single_with_profiling(prompts, num_tokens, i)
                 if i == 2:  # Save profile after 3rd run
-                    profile_data = self._save_profile(prof, profile_output_dir)
+                    # Store profile data to be processed later
+                    profile_data_to_save = prof
             else:
                 run_time = self._run_single(prompts, num_tokens)
                 times_no_profiling.append(run_time)  # Only count non-profiled runs
@@ -87,6 +90,10 @@ class ThroughputBenchmark:
 
             throughput = tokens_generated / run_time
             print(f"   Run {i+1}/{num_runs}: {throughput:.2f} tok/s")
+
+        # Process profiling data after all runs are complete
+        if enable_profiler and profile_data_to_save is not None:
+            profile_data = self._save_profile(profile_data_to_save, profile_output_dir)
 
         # Calculate results - use only non-profiled runs if profiling was enabled
         if enable_profiler and times_no_profiling:
@@ -134,7 +141,7 @@ class ThroughputBenchmark:
         activities = [ProfilerActivity.CPU]
         if torch.cuda.is_available():
             activities.append(ProfilerActivity.CUDA)
-        
+
         # Minimal profiler config - keeps file size small
         prof = profile(
             activities=activities,
@@ -179,7 +186,7 @@ class ThroughputBenchmark:
         
         file_size_mb = trace_file.stat().st_size / (1024 * 1024)
         print(f"\n   📊 Profile saved: {trace_file} ({file_size_mb:.1f} MB)")
-        print(f"      View in: chrome://tracing")
+        print(f"      View in: https://ui.perfetto.dev/")
         
         # Get top operations - use helper function to get time
         key_averages = prof.key_averages()
