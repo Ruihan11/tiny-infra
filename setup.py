@@ -12,7 +12,8 @@ setup(
         "numpy",
         "scipy",
         "tabulate",
-        "setuptools"
+        "setuptools",
+        "triton"
     ],
     entry_points={
         'console_scripts': [
