@@ -66,9 +66,23 @@ tinyinfra benchmark throughput \
 | Naive | 509.82 | 4017.13 |
 | Py-optimized | 641.36  | 3193.20 |
 
-nsys profile -o profiling tinyinfra benchmark throughput \
+tinyinfra benchmark throughput \
     --model meta-llama/Meta-Llama-3-8B \
     --wrapper llama3_02_opt \
+    --batch-size 8 \
+    --num-tokens 256 \
+    --num-runs 10
+
+tinyinfra benchmark throughput \
+    --model meta-llama/Meta-Llama-3-8B \
+    --wrapper llama3_01_naive \
+    --batch-size 8 \
+    --num-tokens 256 \
+    --num-runs 10
+
+tinyinfra benchmark throughput \
+    --model meta-llama/Meta-Llama-3-8B \
+    --wrapper llama3_00_hf \
     --batch-size 8 \
     --num-tokens 256 \
     --num-runs 10
