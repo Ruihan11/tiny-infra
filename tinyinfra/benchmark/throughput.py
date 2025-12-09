@@ -145,10 +145,10 @@ class ThroughputBenchmark:
         # Minimal profiler config - keeps file size small
         prof = profile(
             activities=activities,
-            record_shapes=False,      # ❌ Disable shapes (saves space)
-            profile_memory=False,     # ❌ Disable memory profiling (saves space)
-            with_stack=False,         # ❌ Disable stack traces (saves space)
-            with_flops=False,         # ❌ Disable FLOPs calculation
+            record_shapes=True,      #  shapes (saves space)
+            profile_memory=True,     #  memory profiling (saves space)
+            with_stack=True,         #  stack traces (saves space)
+            with_flops=True,         #  FLOPs calculation
         )
         
         prof.__enter__()

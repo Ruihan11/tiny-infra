@@ -292,7 +292,7 @@ if __name__ == "__main__":
     print(f"   Size: {model.get_model_size():.2f} GB")
     print(f"   Memory: {model.get_memory_usage():.2f} GB")
 
-    prompt = "AI is"
+    prompt = "Hi. My name is"
     output = model.generate(prompt=prompt, max_new_tokens=200)
 
     print(f"\n✅ Generation test")
