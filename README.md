@@ -52,7 +52,7 @@ tinyinfra info
 ```bash
 tinyinfra benchmark throughput \
     --model meta-llama/Meta-Llama-3-8B \
-    --wrapper llama3_02_opt \
+    --wrapper llama3_00_hf \
     --batch-size 8 \
     --num-tokens 256 \
     --num-runs 10
@@ -66,7 +66,14 @@ tinyinfra benchmark throughput \
 
 tinyinfra benchmark throughput \
     --model meta-llama/Meta-Llama-3-8B \
-    --wrapper llama3_00_hf \
+    --wrapper llama3_02_opt \
+    --batch-size 8 \
+    --num-tokens 256 \
+    --num-runs 10
+
+tinyinfra benchmark throughput \
+    --model meta-llama/Meta-Llama-3-8B \
+    --wrapper llama3_03_compile \
     --batch-size 8 \
     --num-tokens 256 \
     --num-runs 10
