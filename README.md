@@ -49,23 +49,7 @@ tinyinfra info
 
 ## Benchmark Results
 
-Example results on RTX5090 GPU:
-
 ```bash
-tinyinfra benchmark throughput \
-    --model meta-llama/Meta-Llama-3-8B \
-    --wrapper llama3_02_opt \
-    --batch-size 8 \
-    --num-tokens 256 \
-    --num-runs 10
-```
-
-| Wrapper | Throughput (tokens/sec) | Mean Latency (ms) |
-|---------|------------------------|-------------------|
-| HuggingFace | 508.19 | 4029.96 |
-| Naive | 509.82 | 4017.13 |
-| Py-optimized | 641.36  | 3193.20 |
-
 tinyinfra benchmark throughput \
     --model meta-llama/Meta-Llama-3-8B \
     --wrapper llama3_02_opt \
@@ -86,3 +70,11 @@ tinyinfra benchmark throughput \
     --batch-size 8 \
     --num-tokens 256 \
     --num-runs 10
+```
+
+| Wrapper | Throughput (tokens/sec) | Mean Latency (ms) |
+|---------|------------------------|-------------------|
+| HF | 508.19 | 4029.96 |
+| Naive | 509.82 | 4017.13 |
+| Opt | 641.36  | 3193.20 |
+
