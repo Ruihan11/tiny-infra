@@ -79,9 +79,11 @@ tinyinfra benchmark throughput \
     --num-runs 10
 ```
 
+On H100 SXM
+
 | Wrapper | Throughput (tokens/sec) | Mean Latency (ms) |
 |---------|------------------------|-------------------|
-| HF | 508.19 | 4029.96 |
-| Naive | 509.82 | 4017.13 |
-| Opt | 641.36  | 3193.20 |
-
+| HF    | 458.80 | 4463.86 |
+| Naive | 450.71 | 4543.91 |
+| Opt   | 688.81 | 2973.23 |
+| torch.compile(reduce-overhead) | 961.48  | 2130.04 |

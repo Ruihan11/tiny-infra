@@ -7,10 +7,6 @@ Key optimizations:
 2. Compiled graph execution to reduce Python overhead
 3. Dynamic shape compilation for flexible batch sizes
 4. All existing optimizations from llama3_02_opt.py (fused ops, KV cache, FlashAttention)
-5. Optional Triton kernels (disabled by default to ensure torch.compile compatibility)
-
-Note: Triton kernels are disabled by default when using torch.compile as they can cause
-symbolic shape issues. torch.compile itself provides excellent optimization without them.
 """
 import torch
 import torch.nn as nn
@@ -19,227 +15,77 @@ from typing import Optional, Tuple, List
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 import math
 
-# Import Triton for custom kernels
-try:
-    import triton
-    import triton.language as tl
-    TRITON_AVAILABLE = True
-except ImportError:
-    TRITON_AVAILABLE = False
-    print("⚠️  Triton not available - falling back to PyTorch operations")
-
 
 # ============================================================================
-# Triton Kernels for Maximum Performance
+# Optimized Components for torch.compile
 # ============================================================================
 
-if TRITON_AVAILABLE:
-    @triton.jit
-    def rms_norm_kernel(
-        x_ptr,  # Input pointer
-        weight_ptr,  # Weight pointer
-        output_ptr,  # Output pointer
-        stride_batch,
-        stride_seq,
-        stride_dim,
-        N_DIM: tl.constexpr,
-        eps: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr,
-    ):
-        """
-        Triton kernel for RMSNorm - fuses mean calculation and normalization
-        """
-        # Get program ID
-        pid_batch = tl.program_id(0)
-        pid_seq = tl.program_id(1)
-        
-        # Calculate base offset
-        base_offset = pid_batch * stride_batch + pid_seq * stride_seq
-        
-        # Load input in blocks
-        block_start = 0
-        variance = 0.0
-        
-        for block_start in range(0, N_DIM, BLOCK_SIZE):
-            offsets = block_start + tl.arange(0, BLOCK_SIZE)
-            mask = offsets < N_DIM
-            
-            x = tl.load(x_ptr + base_offset + offsets * stride_dim, mask=mask, other=0.0)
-            variance += tl.sum(x * x, axis=0)
-        
-        # Calculate RMS
-        variance = variance / N_DIM
-        rstd = 1.0 / tl.sqrt(variance + eps)
-        
-        # Normalize and scale
-        for block_start in range(0, N_DIM, BLOCK_SIZE):
-            offsets = block_start + tl.arange(0, BLOCK_SIZE)
-            mask = offsets < N_DIM
-            
-            x = tl.load(x_ptr + base_offset + offsets * stride_dim, mask=mask, other=0.0)
-            weight = tl.load(weight_ptr + offsets, mask=mask, other=1.0)
-            
-            output = x * rstd * weight
-            tl.store(output_ptr + base_offset + offsets * stride_dim, output, mask=mask)
-
-    @triton.jit
-    def rope_kernel(
-        q_ptr, k_ptr,  # Input Q, K pointers
-        q_out_ptr, k_out_ptr,  # Output pointers
-        cos_ptr, sin_ptr,  # Precomputed cos/sin
-        stride_batch, stride_head, stride_seq, stride_dim,
-        HEAD_DIM: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr,
-    ):
-        """
-        Triton kernel for RoPE - applies rotary positional embeddings
-        """
-        pid_batch = tl.program_id(0)
-        pid_head = tl.program_id(1)
-        pid_seq = tl.program_id(2)
-        
-        # Calculate base offset
-        base_offset = (pid_batch * stride_batch + 
-                      pid_head * stride_head + 
-                      pid_seq * stride_seq)
-        
-        # Process in blocks of HEAD_DIM/2
-        half_dim = HEAD_DIM // 2
-        
-        for i in range(0, half_dim, BLOCK_SIZE):
-            offsets = i + tl.arange(0, BLOCK_SIZE)
-            mask = offsets < half_dim
-            
-            # Load Q and K
-            q1 = tl.load(q_ptr + base_offset + offsets * stride_dim, mask=mask, other=0.0)
-            q2 = tl.load(q_ptr + base_offset + (offsets + half_dim) * stride_dim, mask=mask, other=0.0)
-            k1 = tl.load(k_ptr + base_offset + offsets * stride_dim, mask=mask, other=0.0)
-            k2 = tl.load(k_ptr + base_offset + (offsets + half_dim) * stride_dim, mask=mask, other=0.0)
-            
-            # Load cos/sin
-            cos_val = tl.load(cos_ptr + pid_seq * half_dim + offsets, mask=mask, other=1.0)
-            sin_val = tl.load(sin_ptr + pid_seq * half_dim + offsets, mask=mask, other=0.0)
-            
-            # Apply rotation
-            q_rot1 = q1 * cos_val - q2 * sin_val
-            q_rot2 = q2 * cos_val + q1 * sin_val
-            k_rot1 = k1 * cos_val - k2 * sin_val
-            k_rot2 = k2 * cos_val + k1 * sin_val
-            
-            # Store results
-            tl.store(q_out_ptr + base_offset + offsets * stride_dim, q_rot1, mask=mask)
-            tl.store(q_out_ptr + base_offset + (offsets + half_dim) * stride_dim, q_rot2, mask=mask)
-            tl.store(k_out_ptr + base_offset + offsets * stride_dim, k_rot1, mask=mask)
-            tl.store(k_out_ptr + base_offset + (offsets + half_dim) * stride_dim, k_rot2, mask=mask)
-
-    @triton.jit
-    def swiglu_kernel(
-        gate_ptr, up_ptr,  # Input pointers
-        output_ptr,  # Output pointer
-        N: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr,
-    ):
-        """
-        Triton kernel for SwiGLU - fuses SiLU activation and multiplication
-        """
-        pid = tl.program_id(0)
-        
-        block_start = pid * BLOCK_SIZE
-        offsets = block_start + tl.arange(0, BLOCK_SIZE)
-        mask = offsets < N
-        
-        # Load gate and up
-        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0)
-        up = tl.load(up_ptr + offsets, mask=mask, other=0.0)
-        
-        # SwiGLU: silu(gate) * up
-        # silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
-        sigmoid = 1.0 / (1.0 + tl.exp(-gate))
-        silu = gate * sigmoid
-        output = silu * up
-        
-        tl.store(output_ptr + offsets, output, mask=mask)
-
-
-# ============================================================================
-# Triton-Optimized Components
-# ============================================================================
-
-class TritonRMSNorm(nn.Module):
-    """RMSNorm with optional Triton kernel"""
-    def __init__(self, dim: int, eps: float = 1e-6, enable_triton: bool = False):
+class RMSNorm(nn.Module):
+    """RMSNorm optimized for torch.compile"""
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
         self.dim = dim
-        # Disable Triton by default when using torch.compile
-        self.use_triton = TRITON_AVAILABLE and enable_triton
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Use PyTorch implementation (works well with torch.compile)
         norm = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return x * norm * self.weight
 
 
-class TritonRoPE(nn.Module):
-    """RoPE with optional Triton kernel"""
-    def __init__(self, dim: int, max_seq_len: int = 4096, base: float = 500000.0, device: str = "cuda", enable_triton: bool = False):
+class RoPE(nn.Module):
+    """RoPE optimized for torch.compile"""
+    def __init__(self, dim: int, max_seq_len: int = 4096, base: float = 500000.0, device: str = "cuda"):
         super().__init__()
         self.dim = dim
         self.max_seq_len = max_seq_len
         self.base = base
-        # Disable Triton by default when using torch.compile
-        self.use_triton = TRITON_AVAILABLE and enable_triton
-        
+
         # Pre-compute and cache
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device=device).float() / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._build_cache(max_seq_len, device)
-    
+
     def _build_cache(self, seq_len: int, device: str = "cuda"):
         """Build cos/sin cache"""
         t = torch.arange(seq_len, device=device, dtype=torch.float32)
         freqs = torch.outer(t, self.inv_freq)
-        
+
         cos = freqs.cos()
         sin = freqs.sin()
-        
+
         self.register_buffer("cos_cached", cos, persistent=False)
         self.register_buffer("sin_cached", sin, persistent=False)
-    
+
     def forward(self, q: torch.Tensor, k: torch.Tensor, start_pos: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply RoPE to Q and K"""
         seq_len = q.shape[2]
-        
+
         if start_pos + seq_len > self.max_seq_len:
             self._build_cache(start_pos + seq_len, self.inv_freq.device)
             self.max_seq_len = start_pos + seq_len
-        
+
         cos = self.cos_cached[start_pos:start_pos + seq_len].to(q.dtype)
         sin = self.sin_cached[start_pos:start_pos + seq_len].to(q.dtype)
-        
-        # Use PyTorch implementation (works well with torch.compile)
+
         q1, q2 = q[..., :q.shape[-1]//2], q[..., q.shape[-1]//2:]
         k1, k2 = k[..., :k.shape[-1]//2], k[..., k.shape[-1]//2:]
-        
+
         cos = cos.unsqueeze(0).unsqueeze(0)
         sin = sin.unsqueeze(0).unsqueeze(0)
-        
+
         q_rot = torch.cat([q1 * cos - q2 * sin, q2 * cos + q1 * sin], dim=-1)
         k_rot = torch.cat([k1 * cos - k2 * sin, k2 * cos + k1 * sin], dim=-1)
-        
+
         return q_rot, k_rot
 
 
-class TritonSwiGLU(nn.Module):
-    """SwiGLU with optional Triton kernel"""
-    def __init__(self, enable_triton: bool = False):
+class SwiGLU(nn.Module):
+    """SwiGLU optimized for torch.compile"""
+    def __init__(self):
         super().__init__()
-        # Disable Triton by default when using torch.compile to avoid symbolic shape issues
-        self.use_triton = TRITON_AVAILABLE and enable_triton
-    
+
     def forward(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-        # Use PyTorch implementation (works well with torch.compile)
         return F.silu(gate) * up
 
 
@@ -252,15 +98,14 @@ class CompiledAttention(nn.Module):
     Attention with torch.compile optimization
     """
     def __init__(
-        self, 
-        dim: int, 
-        n_heads: int, 
+        self,
+        dim: int,
+        n_heads: int,
         n_kv_heads: int,
         max_seq_len: int = 4096,
         rope_base: float = 500000.0,
         device: str = "cuda",
-        dtype: torch.dtype = torch.float16,
-        enable_triton: bool = False
+        dtype: torch.dtype = torch.float16
     ):
         super().__init__()
         self.n_heads = n_heads
@@ -271,21 +116,21 @@ class CompiledAttention(nn.Module):
         self.max_seq_len = max_seq_len
         self.device = device
         self.dtype = dtype
-        
+
         # Fused QKV projection
         self.qkv_proj = nn.Linear(
-            dim, 
-            (n_heads + 2 * n_kv_heads) * self.head_dim, 
+            dim,
+            (n_heads + 2 * n_kv_heads) * self.head_dim,
             bias=False
         )
         self.o_proj = nn.Linear(n_heads * self.head_dim, dim, bias=False)
-        
-        # RoPE with optional Triton
-        self.rotary_emb = TritonRoPE(self.head_dim, max_seq_len, rope_base, device, enable_triton)
-        
+
+        # RoPE
+        self.rotary_emb = RoPE(self.head_dim, max_seq_len, rope_base, device)
+
         # KV cache
         self.kv_cache: Optional[dict] = None
-        
+
         # GQA expansion indices
         if self.n_rep > 1:
             self.register_buffer(
@@ -372,13 +217,13 @@ class CompiledAttention(nn.Module):
 
 
 class CompiledFFN(nn.Module):
-    """FFN with torch.compile and optional Triton SwiGLU"""
-    def __init__(self, dim: int, hidden_dim: int, enable_triton: bool = False):
+    """FFN with torch.compile"""
+    def __init__(self, dim: int, hidden_dim: int):
         super().__init__()
         self.gate_up_proj = nn.Linear(dim, hidden_dim * 2, bias=False)
         self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
-        self.swiglu = TritonSwiGLU(enable_triton)
-        
+        self.swiglu = SwiGLU()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up = self.gate_up_proj(x)
         gate, up = gate_up.chunk(2, dim=-1)
@@ -397,16 +242,15 @@ class CompiledTransformerBlock(nn.Module):
         rope_base: float = 500000.0,
         rms_norm_eps: float = 1e-6,
         device: str = "cuda",
-        dtype: torch.dtype = torch.float16,
-        enable_triton: bool = False
+        dtype: torch.dtype = torch.float16
     ):
         super().__init__()
         self.attention = CompiledAttention(
-            dim, n_heads, n_kv_heads, max_seq_len, rope_base, device, dtype, enable_triton
+            dim, n_heads, n_kv_heads, max_seq_len, rope_base, device, dtype
         )
-        self.feed_forward = CompiledFFN(dim, hidden_dim, enable_triton)
-        self.attention_norm = TritonRMSNorm(dim, rms_norm_eps, enable_triton)
-        self.ffn_norm = TritonRMSNorm(dim, rms_norm_eps, enable_triton)
+        self.feed_forward = CompiledFFN(dim, hidden_dim)
+        self.attention_norm = RMSNorm(dim, rms_norm_eps)
+        self.ffn_norm = RMSNorm(dim, rms_norm_eps)
 
     def forward(
         self, 
@@ -426,15 +270,12 @@ class CompiledTransformerBlock(nn.Module):
 class Llama3Compiled:
     """
     Torch.compile-optimized Llama3 for maximum performance
-    
+
     Optimizations over llama3_02_opt.py:
     - torch.compile for forward pass (prefill and decode)
     - Reduced Python overhead via graph compilation
     - Dynamic shape support for flexible batching
     - All existing optimizations: fused QKV/gate-up, KV cache, FlashAttention
-    
-    Note: Triton kernels are available but disabled by default as torch.compile
-    provides excellent optimization on its own and avoids symbolic shape issues.
     """
 
     def __init__(
@@ -443,8 +284,7 @@ class Llama3Compiled:
         device: str = "cuda",
         dtype: torch.dtype = torch.float16,
         max_seq_len: int = 4096,
-        compile_mode: str = "max-autotune",  # "default", "reduce-overhead", "max-autotune"
-        enable_triton: bool = False,  # Enable Triton kernels (experimental)
+        compile_mode: str = "reduce-overhead",  # "default", "reduce-overhead", "max-autotune"
     ):
         """
         Initialize torch.compile-optimized Llama3 model
@@ -458,21 +298,13 @@ class Llama3Compiled:
                 - "default": Standard compilation
                 - "reduce-overhead": Minimize Python overhead (recommended)
                 - "max-autotune": Maximum optimization (slower compile, faster runtime)
-            enable_triton: Enable Triton kernels (experimental, may cause issues with torch.compile)
         """
         self.model_name = model_name
         self.device = device
         self.dtype = dtype if device == "cuda" else torch.float32
         self.max_seq_len = max_seq_len
         self.compile_mode = compile_mode
-        self.enable_triton = enable_triton and TRITON_AVAILABLE
-        
-        if enable_triton and not TRITON_AVAILABLE:
-            print("⚠️  Triton requested but not available - using PyTorch fallbacks")
-        elif not enable_triton:
-            print("ℹ️  Triton kernels disabled (using PyTorch ops for better torch.compile compatibility)")
 
-        
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
@@ -481,7 +313,7 @@ class Llama3Compiled:
         # Load config
         print(f"⏳ Loading config from {model_name}...")
         config = AutoConfig.from_pretrained(model_name)
-        
+
         self.vocab_size = config.vocab_size
         self.dim = config.hidden_size
         self.n_layers = config.num_hidden_layers
@@ -520,18 +352,18 @@ class Llama3Compiled:
     def _build_model(self):
         """Build model architecture"""
         self.embedding = nn.Embedding(self.vocab_size, self.dim)
-        
+
         self.layers = nn.ModuleList([
             CompiledTransformerBlock(
                 self.dim, self.n_heads, self.n_kv_heads, self.hidden_dim,
                 self.max_seq_len, self.rope_base, self.rms_norm_eps,
-                self.device, self.dtype, self.enable_triton
+                self.device, self.dtype
             )
             for _ in range(self.n_layers)
         ])
-        
-        self.norm = TritonRMSNorm(self.dim, self.rms_norm_eps, self.enable_triton)
-        self.output = nn.Linear(self.vocab_size, self.dim, bias=False)
+
+        self.norm = RMSNorm(self.dim, self.rms_norm_eps)
+        self.output = nn.Linear(self.dim, self.vocab_size, bias=False)
         
         # Move to device
         self.embedding = self.embedding.to(self.device, self.dtype)
@@ -589,11 +421,11 @@ class Llama3Compiled:
         
         # Final norm and output
         self.norm.weight.data.copy_(hf_state['model.norm.weight'])
-        
+
         if 'lm_head.weight' in hf_state:
-            self.output.weight.data.copy_(hf_state['lm_head.weight'].t())
+            self.output.weight.data.copy_(hf_state['lm_head.weight'])
         else:
-            self.output.weight.data.copy_(hf_state['model.embed_tokens.weight'].t())
+            self.output.weight.data.copy_(hf_state['model.embed_tokens.weight'])
         
         # Cleanup
         del hf_model, hf_state
@@ -613,24 +445,84 @@ class Llama3Compiled:
             torch.backends.cuda.enable_mem_efficient_sdp(True)
 
     def _compile_model(self):
-        """Compile model with torch.compile"""
-        # Compile forward pass for prefill
+        """Compile model with torch.compile in full activation mode"""
+        # Configure dynamo for compilation
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = False  # Show errors for debugging
+        torch._dynamo.config.verbose = False
+
+        # Full activation mode: aggressive optimization settings
+        torch._dynamo.config.cache_size_limit = 128
+
+        # Compile forward pass with full graph optimization
         self.forward_compiled = torch.compile(
             self._forward_impl,
             mode=self.compile_mode,
-            fullgraph=False,  # Allow graph breaks for flexibility
-            dynamic=True,  # Support dynamic shapes
+            fullgraph=False,  # Allow fallback to eager mode for dynamic ops
+            dynamic=True,     # Support dynamic shapes for different batch sizes
         )
-        
-        # Compile decode step
+
+        # Compile decode step with full graph optimization
         self.decode_compiled = torch.compile(
             self._decode_step_impl,
             mode=self.compile_mode,
-            fullgraph=False,
-            dynamic=True,
+            fullgraph=False,  # Allow fallback to eager mode for dynamic ops
+            dynamic=True,     # Support dynamic shapes for different batch sizes
         )
-        
+
         print(f"   ✅ Compiled forward and decode functions")
+
+        # Warmup compilation with dummy inputs
+        if self.device == "cuda":
+            print(f"   ⏳ Warming up compiled functions...")
+            self._warmup_compilation()
+            print(f"   ✅ Warmup complete")
+
+    def _warmup_compilation(self):
+        """Warmup compiled functions with dummy inputs to trigger compilation"""
+        try:
+            with torch.inference_mode():
+                # Mark step begin for CUDA graphs compatibility
+                if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+                    torch.compiler.cudagraph_mark_step_begin()
+
+                # Warmup prefill with a small sequence
+                dummy_tokens = torch.randint(
+                    0, self.vocab_size, (1, 8), device=self.device, dtype=torch.long
+                )
+                out1 = self.forward_compiled(dummy_tokens, start_pos=0, use_cache=False)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                del out1
+
+                # Mark step for next run
+                if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+                    torch.compiler.cudagraph_mark_step_begin()
+
+                # Warmup decode with cache
+                self.clear_cache()
+                out2 = self.forward_compiled(dummy_tokens, start_pos=0, use_cache=True)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                del out2
+
+                # Mark step for decode
+                if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+                    torch.compiler.cudagraph_mark_step_begin()
+
+                dummy_token = torch.randint(
+                    0, self.vocab_size, (1, 1), device=self.device, dtype=torch.long
+                )
+                out3 = self.decode_compiled(dummy_token, start_pos=8)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                del out3
+
+                # Clear cache after warmup
+                self.clear_cache()
+        except Exception as e:
+            # If warmup fails, just warn and continue - model will compile on first use
+            print(f"   ⚠️  Warmup warning: {str(e)[:80]}... (will compile on first use)")
 
     def _forward_impl(
         self, 
@@ -645,8 +537,8 @@ class Llama3Compiled:
             x = layer(x, start_pos, use_cache)
         
         x = self.norm(x)
-        logits = F.linear(x, self.output.weight.t())
-        
+        logits = self.output(x)
+
         return logits
 
     def _decode_step_impl(
@@ -659,9 +551,9 @@ class Llama3Compiled:
         
         for layer in self.layers:
             x = layer(x, start_pos, use_cache=True)
-        
+
         x = self.norm(x)
-        return F.linear(x, self.output.weight.t())
+        return self.output(x)
 
     def forward(
         self, 
